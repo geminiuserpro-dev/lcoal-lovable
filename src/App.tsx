@@ -8,6 +8,7 @@ import { FirebaseProvider } from "./components/FirebaseProvider";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { useEffect, Suspense, lazy } from "react";
 import { trackEvent } from "./lib/analytics";
+import { Analytics } from "@vercel/analytics/react";
 
 import Index from "./pages/Index";
 import Editor from "./pages/Editor";
@@ -53,6 +54,7 @@ const App = () => (
                 </Routes>
               </Suspense>
             </BrowserRouter>
+            <Analytics />
           </TooltipProvider>
         </FirebaseProvider>
       </ThemeProvider>
