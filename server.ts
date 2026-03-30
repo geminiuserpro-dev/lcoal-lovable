@@ -1,6 +1,6 @@
 import "dotenv/config";
 import express from "express";
-import { createServer as createViteServer } from "vite";
+// Vite is imported dynamically in startServer to avoid crashing in production where it is missing
 import { GoogleGenAI } from "@google/genai";
 import path from "path";
 import compression from "compression";
@@ -67,10 +67,27 @@ app.get("/api/sandboxes", async (req, res) => {
   }
 });
 
+// Diagnostic endpoints
+app.get("/api/health", (req, res) => {
+  res.json({ status: "ok", env: process.env.NODE_ENV, vercel: !!process.env.VERCEL });
+});
+
+app.get("/api/debug-env", (req, res) => {
+  const mask = (key?: string) => key ? `${key.slice(0, 4)}...${key.slice(-4)}` : "MISSING";
+  res.json({
+    DAYTONA_API_KEY: mask(process.env.DAYTONA_API_KEY),
+    GEMINI_API_KEY: mask(process.env.GEMINI_API_KEY),
+    STRIPE_SECRET_KEY: mask(process.env.STRIPE_SECRET_KEY),
+    FIRECRAWL_API_KEY: mask(process.env.FIRECRAWL_API_KEY),
+  });
+});
+
 // Daytona endpoint
 app.post("/api/daytona", async (req, res) => {
   // Rate limit: 60 sandbox operations per minute per IP
-  const ip = (req.headers["x-forwarded-for"] as string || (req as any).ip || "unknown").split(",")[0].trim();
+  const ipHeader = req.headers["x-forwarded-for"];
+  const ipRaw = Array.isArray(ipHeader) ? ipHeader[0] : (ipHeader as string || (req as any).ip || "unknown");
+  const ip = ipRaw.split(",")[0].trim();
   if (!rateLimit(`daytona:${ip}`, 60)) {
     return res.status(429).json({ error: "Too many requests. Please slow down." });
   }
@@ -601,7 +618,9 @@ app.post("/api/firecrawl/:action", async (req, res) => {
 
 // ── Rate-limited AI endpoint helper ───────────────────────────────────────────
 app.use("/api/ai", (req, res, next) => {
-  const ip = (req.headers["x-forwarded-for"] as string || (req as any).ip || "unknown").split(",")[0].trim();
+  const ipHeader = req.headers["x-forwarded-for"];
+  const ipRaw = Array.isArray(ipHeader) ? ipHeader[0] : (ipHeader as string || (req as any).ip || "unknown");
+  const ip = ipRaw.split(",")[0].trim();
   if (!rateLimit(`ai:${ip}`, 20)) {
     return res.status(429).json({ error: "Rate limit exceeded. Max 20 AI requests per minute." });
   }
@@ -725,13 +744,18 @@ app.post("/api/create-checkout-session", async (req, res) => {
 });
 
 async function startServer() {
-  // Vite middleware for development
+  // Vite middleware for development (only when not in production and not in Vercel)
   if (process.env.NODE_ENV !== "production" && !process.env.VERCEL) {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: "spa",
-    });
-    app.use(vite.middlewares);
+    try {
+      const { createServer: createViteServer } = await import("vite");
+      const vite = await createViteServer({
+        server: { middlewareMode: true },
+        appType: "spa",
+      });
+      app.use(vite.middlewares);
+    } catch (err) {
+      console.warn("Vite failed to load (expected on production Vercel):", err);
+    }
   } else {
     app.use(express.static("dist"));
   }
