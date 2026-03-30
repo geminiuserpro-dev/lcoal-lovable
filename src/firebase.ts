@@ -24,7 +24,7 @@ let storage: any;
 if (isFirebaseConfigured) {
   try {
     app = initializeApp(firebaseConfig);
-    db = getFirestore(app); // Firestore uses the projectId from the config by default
+    db = getFirestore(app, firebaseConfig.firestoreDatabaseId); // Use the specific databaseId if provided
     auth = getAuth(app);
     storage = getStorage(app);
   } catch (error) {
