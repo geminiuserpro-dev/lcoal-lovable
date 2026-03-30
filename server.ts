@@ -70,7 +70,7 @@ app.get("/api/sandboxes", async (req, res) => {
 // Daytona endpoint
 app.post("/api/daytona", async (req, res) => {
   // Rate limit: 60 sandbox operations per minute per IP
-  const ip = (req.headers["x-forwarded-for"] as string || req.socket.remoteAddress || "unknown").split(",")[0].trim();
+  const ip = (req.headers["x-forwarded-for"] as string || (req as any).ip || "unknown").split(",")[0].trim();
   if (!rateLimit(`daytona:${ip}`, 60)) {
     return res.status(429).json({ error: "Too many requests. Please slow down." });
   }
@@ -183,9 +183,8 @@ app.post("/api/daytona", async (req, res) => {
       if (!response.ok) throw new Error(`Failed to create sandbox: ${await response.text()}`);
       const data = await response.json();
 
-      // Ensure container is actually ready before returning sandboxId
-      await runToolboxCommand(data.id, "echo sandbox-ready", { retries: 15, retryDelayMs: 1000 });
-
+      // We return immediately without waiting for "ready" to avoid Vercel timeouts.
+      // The frontend should poll the "health" endpoint to know when to proceed.
       res.json({ sandboxId: data.id, status: data.state });
     }
     else if (action === "execute") {
@@ -602,7 +601,7 @@ app.post("/api/firecrawl/:action", async (req, res) => {
 
 // ── Rate-limited AI endpoint helper ───────────────────────────────────────────
 app.use("/api/ai", (req, res, next) => {
-  const ip = (req.headers["x-forwarded-for"] as string || req.socket.remoteAddress || "unknown").split(",")[0].trim();
+  const ip = (req.headers["x-forwarded-for"] as string || (req as any).ip || "unknown").split(",")[0].trim();
   if (!rateLimit(`ai:${ip}`, 20)) {
     return res.status(429).json({ error: "Rate limit exceeded. Max 20 AI requests per minute." });
   }

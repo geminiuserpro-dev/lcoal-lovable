@@ -192,6 +192,28 @@ export const SandboxProvider = ({ children }: { children: React.ReactNode }) => 
       try {
         const result = await createSandbox("typescript");
         setSandboxId(result.sandboxId);
+        sandboxIdRef.current = result.sandboxId;
+
+        // Poll for ready status (Vercel bypass)
+        let isReady = false;
+        let attempts = 0;
+        const maxAttempts = 25; // ~50 seconds max
+        
+        while (!isReady && attempts < maxAttempts) {
+          attempts++;
+          try {
+            const health = await getSandboxHealth(result.sandboxId);
+            const state = (health.status || "").toLowerCase();
+            if (state === "ready" || state === "started" || state === "starting") {
+              isReady = true;
+              break;
+            }
+          } catch (e) {
+            console.warn(`Health check attempt ${attempts} failed:`, e);
+          }
+          await new Promise(resolve => setTimeout(resolve, 2000));
+        }
+
         setStatus("ready");
         toast.success("Sandbox ready!");
         return result.sandboxId;
