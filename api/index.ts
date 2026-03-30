@@ -57,6 +57,7 @@ app.get("/api/debug-env", (req, res) => {
     ANTHROPIC_API_KEY: mask(process.env.ANTHROPIC_API_KEY),
     FIRECRAWL_API_KEY: mask(process.env.FIRECRAWL_API_KEY),
     FIREBASE_PROJECT_ID: process.env.VITE_FIREBASE_PROJECT_ID ? "SET" : "MISSING",
+    FIREBASE_DB_ID: process.env.VITE_FIREBASE_FIRESTORE_DATABASE_ID ? "SET" : "MISSING",
   });
 });
 
@@ -88,7 +89,6 @@ app.post("/api/daytona", async (req, res) => {
       const retries = opts?.retries ?? 5;
       const delay = opts?.retryDelayMs ?? 1000;
       let lastErr: any = "Unknown error";
-      
       for (let i = 0; i < retries; i++) {
         try {
           const proxyUrl = await getToolboxProxyUrl(sid);
@@ -97,15 +97,13 @@ app.post("/api/daytona", async (req, res) => {
           });
           if (resp.ok) return await resp.json();
           lastErr = new Error(`Toolbox error: ${resp.status} ${await resp.text()}`);
-        } catch (e) {
-          lastErr = e;
-        }
+        } catch (e) { lastErr = e; }
         if (i < retries - 1) await sleep(delay);
       }
       throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
     };
 
-    const runShellCommand = (sid: string, cmd: string, opts?: any) => 
+    const runShellCommand = (sid: string, cmd: string, opts?: any) =>
       runToolboxCommand(sid, `/bin/sh -lc '${cmd.replace(/'/g, "'\\''")}'`, opts);
 
     const { sandboxId, command, filePath, content, workDir = "/home/daytona" } = params;
@@ -128,8 +126,7 @@ app.post("/api/daytona", async (req, res) => {
       const data = await runShellCommand(sandboxId, `base64 -w 0 '${filePath}'`);
       res.json({ content: Buffer.from(data.result || "", "base64").toString("utf8"), exitCode: data.exitCode });
     } else if (action === "cloneRepo") {
-      const { repoUrl } = params;
-      const data = await runShellCommand(sandboxId, `rm -rf ${workDir}/repo && git clone --depth 1 ${repoUrl} ${workDir}/repo`);
+      const data = await runShellCommand(sandboxId, `rm -rf ${workDir}/repo && git clone --depth 1 ${params.repoUrl} ${workDir}/repo`);
       res.json({ success: true, result: data.result, exitCode: data.exitCode });
     } else if (action === "health") {
       const resp = await fetch(`${DAYTONA_API}/sandbox/${sandboxId}`, { headers: authHeaders });
@@ -137,13 +134,33 @@ app.post("/api/daytona", async (req, res) => {
       res.json({ status: data.state });
     } else if (action === "listFiles") {
       const dir = params.dir || `${workDir}/repo`;
-      const data = await runShellCommand(sandboxId, `find ${dir} -maxdepth 4 -not -path '*/node_modules/*' -type f | head -200`);
+      const data = await runShellCommand(sandboxId, `find ${dir} -maxdepth 5 -not -path '*/node_modules/*' -not -path '*/.git/*' -type f | head -200`);
       res.json({ result: data.result || "", exitCode: data.exitCode });
     } else if (action === "startDevServer") {
-      const port = params.port || 5173;
+      const port = params.port || 3000;
       const wd = `${workDir}/repo`;
+      let previewToken = "";
+      try {
+        const tr = await fetch(`${DAYTONA_API}/sandbox/${sandboxId}/preview-token`, { headers: authHeaders });
+        if (tr.ok) previewToken = (await tr.json()).token || "";
+      } catch (e) { }
       const data = await runShellCommand(sandboxId, `cd ${wd} && npm install --legacy-peer-deps && (npx vite --host 0.0.0.0 --port ${port} > /tmp/vite.log 2>&1 &)`);
-      res.json({ previewUrl: `https://${port}-${sandboxId}.proxy.daytona.works`, serverReady: true, result: data.result, exitCode: data.exitCode });
+      res.json({ previewUrl: `https://${port}-${sandboxId}.proxy.daytona.works`, previewToken, serverReady: true, installLog: data.result, viteLog: data.result, exitCode: data.exitCode });
+    } else if (action === "setupWatcher") {
+      const wd = params.workDir || `${workDir}/repo`;
+      const cmd = params.command || "npm run build";
+      await runShellCommand(sandboxId, `cd ${wd} && (npx chokidar '${params.watchDir || "src"}' -c '${cmd}' > /tmp/watcher.log 2>&1 &)`);
+      res.json({ success: true });
+    } else if (action === "searchFiles") {
+      const data = await runShellCommand(sandboxId, `grep -rIl "${params.query}" ${workDir}/repo | head -50`);
+      res.json({ result: data.result, exitCode: data.exitCode });
+    } else if (action === "getLogs") {
+      const data = await runShellCommand(sandboxId, `tail -n 100 /tmp/vite.log || echo "No logs"`);
+      res.json({ result: data.result, exitCode: data.exitCode });
+    } else if (action === "addSecret") {
+      res.json({ success: true, message: "Secrets managed via environment" });
+    } else if (action === "deleteAll") {
+      res.json({ success: true, deletedCount: 0 });
     } else {
       res.status(400).json({ error: `Unknown action: ${action}` });
     }
@@ -188,10 +205,9 @@ app.post("/api/ai/anthropic", async (req, res) => {
 // ── GitHub & Vercel ──────────────────────────────────────────────────────────
 app.post("/api/github/oauth", async (req, res) => {
   try {
-    const { code } = req.body;
     const resp = await fetch("https://github.com/login/oauth/access_token", {
       method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" },
-      body: JSON.stringify({ client_id: process.env.GITHUB_CLIENT_ID, client_secret: process.env.GITHUB_CLIENT_SECRET, code }),
+      body: JSON.stringify({ client_id: process.env.GITHUB_CLIENT_ID, client_secret: process.env.GITHUB_CLIENT_SECRET, code: req.body.code }),
     });
     res.json(await resp.json());
   } catch (e: any) { res.status(500).json({ error: e.message }); }
@@ -222,7 +238,7 @@ app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), async
   try {
     const stripe = getStripe();
     const sig = req.headers["stripe-signature"] as string;
-    const event = process.env.STRIPE_WEBHOOK_SECRET && sig 
+    const event = process.env.STRIPE_WEBHOOK_SECRET && sig
       ? stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET)
       : JSON.parse(req.body.toString());
 
