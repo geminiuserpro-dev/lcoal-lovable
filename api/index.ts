@@ -16,7 +16,6 @@ function rateLimit(key: string, maxPerMinute: number): boolean {
   entry.count++;
   return true;
 }
-// Clean up old entries every 5 minutes
 setInterval(() => {
   const now = Date.now();
   for (const [key, val] of rateLimitMap.entries()) {
@@ -27,7 +26,6 @@ setInterval(() => {
 const app = express();
 app.use(compression());
 
-// Middleware to use raw body for Stripe webhook, otherwise JSON for everything else
 app.use((req, res, next) => {
   if (req.originalUrl === "/api/stripe/webhook") {
     next();
@@ -47,7 +45,6 @@ function getStripe(): Stripe {
   return stripeClient;
 }
 
-// ── Diagnostic endpoints ──────────────────────────────────────────────────────
 app.get("/api/health", (req, res) => {
   res.json({ status: "ok", env: process.env.NODE_ENV, vercel: !!process.env.VERCEL });
 });
@@ -60,7 +57,6 @@ app.get("/api/debug-env", (req, res) => {
     ANTHROPIC_API_KEY: mask(process.env.ANTHROPIC_API_KEY),
     FIRECRAWL_API_KEY: mask(process.env.FIRECRAWL_API_KEY),
     FIREBASE_PROJECT_ID: process.env.VITE_FIREBASE_PROJECT_ID ? "SET" : "MISSING",
-    FIREBASE_DB_ID: process.env.VITE_FIREBASE_FIRESTORE_DATABASE_ID ? "SET" : "MISSING",
   });
 });
 
@@ -89,25 +85,30 @@ app.post("/api/daytona", async (req, res) => {
     };
 
     const runToolboxCommand = async (sid: string, cmd: string, opts?: any) => {
-      const retries = opts?.retries ?? 8;
-      const delay = opts?.retryDelayMs ?? 1200;
-      let lastErr = "Unknown error";
-      let proxyUrl = await getToolboxProxyUrl(sid);
-      for (let i = 1; i <= retries; i++) {
-        const resp = await fetch(`${proxyUrl}/${sid}/process/execute`, {
-          method: "POST", headers: authHeaders, body: JSON.stringify({ command: cmd }),
-        });
-        if (resp.ok) return await resp.json();
-        lastErr = await resp.text();
-        if (i < retries) await sleep(delay * i);
+      const retries = opts?.retries ?? 5;
+      const delay = opts?.retryDelayMs ?? 1000;
+      let lastErr: any = "Unknown error";
+      
+      for (let i = 0; i < retries; i++) {
+        try {
+          const proxyUrl = await getToolboxProxyUrl(sid);
+          const resp = await fetch(`${proxyUrl}/${sid}/process/execute`, {
+            method: "POST", headers: authHeaders, body: JSON.stringify({ command: cmd }),
+          });
+          if (resp.ok) return await resp.json();
+          lastErr = new Error(`Toolbox error: ${resp.status} ${await resp.text()}`);
+        } catch (e) {
+          lastErr = e;
+        }
+        if (i < retries - 1) await sleep(delay);
       }
-      throw new Error(lastErr);
+      throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
     };
 
     const runShellCommand = (sid: string, cmd: string, opts?: any) => 
       runToolboxCommand(sid, `/bin/sh -lc '${cmd.replace(/'/g, "'\\''")}'`, opts);
 
-    const { sandboxId, command, filePath, content, workDir = "/home/daytona/workspace" } = params;
+    const { sandboxId, command, filePath, content, workDir = "/home/daytona" } = params;
 
     if (action === "create") {
       const resp = await fetch(`${DAYTONA_API}/sandbox`, {
@@ -121,26 +122,28 @@ app.post("/api/daytona", async (req, res) => {
       res.json({ result: data.result, exitCode: data.exitCode });
     } else if (action === "writeFile") {
       const b64 = Buffer.from(content || "", "utf8").toString("base64");
-      await runShellCommand(sandboxId, `mkdir -p $(dirname '${filePath}') && printf '%s' '${b64}' | base64 -d > '${filePath}'`);
-      res.json({ success: true });
+      const data = await runShellCommand(sandboxId, `mkdir -p $(dirname '${filePath}') && printf '%s' '${b64}' | base64 -d > '${filePath}'`);
+      res.json({ success: true, result: data.result, exitCode: data.exitCode });
     } else if (action === "readFile") {
       const data = await runShellCommand(sandboxId, `base64 -w 0 '${filePath}'`);
-      res.json({ content: Buffer.from(data.result || "", "base64").toString("utf8") });
+      res.json({ content: Buffer.from(data.result || "", "base64").toString("utf8"), exitCode: data.exitCode });
     } else if (action === "cloneRepo") {
       const { repoUrl } = params;
-      await runShellCommand(sandboxId, `rm -rf ${workDir} && git clone --depth 1 ${repoUrl} ${workDir}`);
-      res.json({ success: true });
+      const data = await runShellCommand(sandboxId, `rm -rf ${workDir}/repo && git clone --depth 1 ${repoUrl} ${workDir}/repo`);
+      res.json({ success: true, result: data.result, exitCode: data.exitCode });
     } else if (action === "health") {
       const resp = await fetch(`${DAYTONA_API}/sandbox/${sandboxId}`, { headers: authHeaders });
       const data = await resp.json();
       res.json({ status: data.state });
     } else if (action === "listFiles") {
-      const data = await runShellCommand(sandboxId, `find ${params.dir || workDir} -maxdepth 4 -not -path '*/node_modules/*' -type f | head -100`);
-      res.json({ result: data.result });
+      const dir = params.dir || `${workDir}/repo`;
+      const data = await runShellCommand(sandboxId, `find ${dir} -maxdepth 4 -not -path '*/node_modules/*' -type f | head -200`);
+      res.json({ result: data.result || "", exitCode: data.exitCode });
     } else if (action === "startDevServer") {
       const port = params.port || 5173;
-      await runShellCommand(sandboxId, `cd ${workDir} && npm install --legacy-peer-deps && (npx vite --host 0.0.0.0 --port ${port} > /tmp/vite.log 2>&1 &)`);
-      res.json({ previewUrl: `https://${port}-${sandboxId}.proxy.daytona.works`, serverReady: true });
+      const wd = `${workDir}/repo`;
+      const data = await runShellCommand(sandboxId, `cd ${wd} && npm install --legacy-peer-deps && (npx vite --host 0.0.0.0 --port ${port} > /tmp/vite.log 2>&1 &)`);
+      res.json({ previewUrl: `https://${port}-${sandboxId}.proxy.daytona.works`, serverReady: true, result: data.result, exitCode: data.exitCode });
     } else {
       res.status(400).json({ error: `Unknown action: ${action}` });
     }
@@ -182,7 +185,7 @@ app.post("/api/ai/anthropic", async (req, res) => {
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-// ── GitHub OAuth ─────────────────────────────────────────────────────────────
+// ── GitHub & Vercel ──────────────────────────────────────────────────────────
 app.post("/api/github/oauth", async (req, res) => {
   try {
     const { code } = req.body;
@@ -194,7 +197,6 @@ app.post("/api/github/oauth", async (req, res) => {
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-// ── Vercel Deploy ────────────────────────────────────────────────────────────
 app.post("/api/deploy", async (req, res) => {
   try {
     const { files, projectName } = req.body;
@@ -215,7 +217,7 @@ app.post("/api/deploy", async (req, res) => {
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-// ── Stripe Webhook & Local Firebase Admin ────────────────────────────────────
+// ── Stripe ───────────────────────────────────────────────────────────────────
 app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), async (req, res) => {
   try {
     const stripe = getStripe();
@@ -253,7 +255,6 @@ app.post("/api/create-checkout-session", async (req, res) => {
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-// ── Firecrawl Proxy ──────────────────────────────────────────────────────────
 app.post("/api/firecrawl/:action", async (req, res) => {
   try {
     const resp = await fetch(`https://api.firecrawl.dev/v1/${req.params.action}`, {
@@ -264,7 +265,6 @@ app.post("/api/firecrawl/:action", async (req, res) => {
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-// ── Static Files & SPA Fallback ──────────────────────────────────────────────
 const publicPath = path.join(process.cwd(), "dist");
 app.use(express.static(publicPath));
 app.get("*", (req, res) => {
