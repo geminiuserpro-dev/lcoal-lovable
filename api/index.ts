@@ -103,10 +103,18 @@ app.post("/api/daytona", async (req, res) => {
       throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
     };
 
-    const runShellCommand = (sid: string, cmd: string, opts?: any) =>
+    const runShellCommand = (sid: string, cmd: string, opts?: any) => 
       runToolboxCommand(sid, `/bin/sh -lc '${cmd.replace(/'/g, "'\\''")}'`, opts);
 
-    const { sandboxId, command, filePath, content, workDir = "/home/daytona" } = params;
+    const { sandboxId, command, filePath, content, workDir: workDirInput = "/home/daytona" } = params;
+    
+    // Robust directory finding: try input workDir, then fallback to common Daytona paths
+    const findWorkDir = `
+      if [ -d "${workDirInput}/repo" ]; then echo "${workDirInput}/repo";
+      elif [ -d "/home/daytona/repo" ]; then echo "/home/daytona/repo";
+      elif [ -d "/project/repo" ]; then echo "/project/repo";
+      else echo "${workDirInput}"; fi
+    `.trim();
 
     if (action === "create") {
       const resp = await fetch(`${DAYTONA_API}/sandbox`, {
@@ -126,41 +134,51 @@ app.post("/api/daytona", async (req, res) => {
       const data = await runShellCommand(sandboxId, `base64 -w 0 '${filePath}'`);
       res.json({ content: Buffer.from(data.result || "", "base64").toString("utf8"), exitCode: data.exitCode });
     } else if (action === "cloneRepo") {
-      const data = await runShellCommand(sandboxId, `rm -rf ${workDir}/repo && git clone --depth 1 ${params.repoUrl} ${workDir}/repo`);
+      // Clone to a predictable 'repo' subdirectory inside the workdir
+      const data = await runShellCommand(sandboxId, `mkdir -p ${workDirInput} && rm -rf ${workDirInput}/repo && git clone --depth 1 ${params.repoUrl} ${workDirInput}/repo`);
       res.json({ success: true, result: data.result, exitCode: data.exitCode });
     } else if (action === "health") {
       const resp = await fetch(`${DAYTONA_API}/sandbox/${sandboxId}`, { headers: authHeaders });
       const data = await resp.json();
       res.json({ status: data.state });
     } else if (action === "listFiles") {
-      const dir = params.dir || `${workDir}/repo`;
-      const data = await runShellCommand(sandboxId, `find ${dir} -maxdepth 5 -not -path '*/node_modules/*' -not -path '*/.git/*' -type f | head -200`);
+      const wdResolved = (await runShellCommand(sandboxId, findWorkDir)).result.trim();
+      const data = await runShellCommand(sandboxId, `find ${wdResolved} -maxdepth 5 -not -path '*/node_modules/*' -not -path '*/.git/*' -type f | head -200`);
       res.json({ result: data.result || "", exitCode: data.exitCode });
     } else if (action === "startDevServer") {
-      const port = params.port || 3000;
-      const wd = `${workDir}/repo`;
+      const port = params.port || 5173;
+      const wdResolved = (await runShellCommand(sandboxId, findWorkDir)).result.trim();
       let previewToken = "";
       try {
         const tr = await fetch(`${DAYTONA_API}/sandbox/${sandboxId}/preview-token`, { headers: authHeaders });
-        if (tr.ok) previewToken = (await tr.json()).token || "";
-      } catch (e) { }
-      const data = await runShellCommand(sandboxId, `cd ${wd} && npm install --legacy-peer-deps && (npx vite --host 0.0.0.0 --port ${port} > /tmp/vite.log 2>&1 &)`);
-      res.json({ previewUrl: `https://${port}-${sandboxId}.proxy.daytona.works`, previewToken, serverReady: true, installLog: data.result, viteLog: data.result, exitCode: data.exitCode });
+        if (tr.ok) {
+          const td = await tr.json();
+          previewToken = td.token || "";
+        }
+      } catch (e) {
+        console.error("Token fetch fail:", e);
+      }
+      const data = await runShellCommand(sandboxId, `cd ${wdResolved} && npm install --legacy-peer-deps && (npx vite --host 0.0.0.0 --port ${port} > /tmp/vite.log 2>&1 &)`);
+      res.json({ 
+        previewUrl: `https://${port}-${sandboxId}.proxy.daytona.works`, 
+        previewToken, 
+        serverReady: true, 
+        installLog: data.result, 
+        viteLog: data.result, 
+        exitCode: data.exitCode 
+      });
     } else if (action === "setupWatcher") {
-      const wd = params.workDir || `${workDir}/repo`;
+      const wdResolved = (await runShellCommand(sandboxId, findWorkDir)).result.trim();
       const cmd = params.command || "npm run build";
-      await runShellCommand(sandboxId, `cd ${wd} && (npx chokidar '${params.watchDir || "src"}' -c '${cmd}' > /tmp/watcher.log 2>&1 &)`);
+      await runShellCommand(sandboxId, `cd ${wdResolved} && (npx chokidar '${params.watchDir || "src"}' -c '${cmd}' > /tmp/watcher.log 2>&1 &)`);
       res.json({ success: true });
     } else if (action === "searchFiles") {
-      const data = await runShellCommand(sandboxId, `grep -rIl "${params.query}" ${workDir}/repo | head -50`);
+      const wdResolved = (await runShellCommand(sandboxId, findWorkDir)).result.trim();
+      const data = await runShellCommand(sandboxId, `grep -rIl "${params.query}" ${wdResolved} | head -50`);
       res.json({ result: data.result, exitCode: data.exitCode });
     } else if (action === "getLogs") {
       const data = await runShellCommand(sandboxId, `tail -n 100 /tmp/vite.log || echo "No logs"`);
       res.json({ result: data.result, exitCode: data.exitCode });
-    } else if (action === "addSecret") {
-      res.json({ success: true, message: "Secrets managed via environment" });
-    } else if (action === "deleteAll") {
-      res.json({ success: true, deletedCount: 0 });
     } else {
       res.status(400).json({ error: `Unknown action: ${action}` });
     }
@@ -238,7 +256,7 @@ app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), async
   try {
     const stripe = getStripe();
     const sig = req.headers["stripe-signature"] as string;
-    const event = process.env.STRIPE_WEBHOOK_SECRET && sig
+    const event = process.env.STRIPE_WEBHOOK_SECRET && sig 
       ? stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET)
       : JSON.parse(req.body.toString());
 
