@@ -1,0 +1,159 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    // Collection: users
+    // Document ID: {userId}
+    // Fields:
+    //   - uid: string (required, immutable)
+    //   - email: string (required, immutable)
+    //   - displayName: string (optional)
+    //   - photoURL: string (optional)
+    //   - role: string (required, immutable for non-admins)
+    //   - createdAt: timestamp (required, immutable)
+    //   - lastLogin: timestamp (required)
+    // ===============================================================
+
+    // Helper Functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+    function isAdmin() {
+      return isAuthenticated() &&
+        (
+          (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin') ||
+          (request.auth.token.email == "geminiuserpro@gmail.com" && request.auth.token.email_verified == true)
+        );
+    }
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+    function isValidEmail(email) {
+      return email is string && email.matches(".+@.+\\..+");
+    }
+    function uidUnchanged() {
+      return !('uid' in request.resource.data) || request.resource.data.uid == request.auth.uid;
+    }
+    function uidNotModified() {
+      return !('uid' in request.resource.data) || request.resource.data.uid == resource.data.uid;
+    }
+
+    function isValidUser(data) {
+      return hasOnlyAllowedFields(['uid', 'email', 'displayName', 'photoURL', 'role', 'createdAt', 'lastLogin', 'lastUpdated']) &&
+             data.uid is string && data.uid.size() > 0 &&
+             data.email is string && isValidEmail(data.email) &&
+             (data.displayName == null || data.displayName is string) &&
+             (data.photoURL == null || data.photoURL is string) &&
+             data.role in ['user', 'admin'] &&
+             data.createdAt is timestamp &&
+             data.lastLogin is timestamp &&
+             (!('lastUpdated' in data) || data.lastUpdated is timestamp);
+    }
+
+    function isValidSandboxState(data) {
+      return hasOnlyAllowedFields(['sandboxId', 'workDir', 'repoUrl', 'projectId', 'previewActive', 'lastUpdated', 'preferences', 'toolConfigs', 'messages', 'chatHistory']) &&
+             (!('sandboxId' in data) || data.sandboxId == null || data.sandboxId is string) &&
+             data.workDir is string &&
+             (!('repoUrl' in data) || data.repoUrl == null || data.repoUrl is string) &&
+             (!('projectId' in data) || data.projectId == null || data.projectId is string) &&
+             data.previewActive is bool &&
+             data.lastUpdated is timestamp &&
+             (!('preferences' in data) || data.preferences is map) &&
+             (!('toolConfigs' in data) || data.toolConfigs is list) &&
+             (!('messages' in data) || data.messages is list) &&
+             (!('chatHistory' in data) || data.chatHistory is list);
+    }
+
+    function isValidProject(data) {
+      return hasOnlyAllowedFields(['id', 'name', 'description', 'ownerId', 'repoUrl', 'storagePath', 'lastModified', 'createdAt']) &&
+             data.id is string && data.id.size() > 0 &&
+             data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
+             (!('description' in data) || data.description == null || (data.description is string && data.description.size() < 500)) &&
+             data.ownerId is string && data.ownerId == request.auth.uid &&
+             (!('repoUrl' in data) || data.repoUrl == null || data.repoUrl is string) &&
+             (!('storagePath' in data) || data.storagePath == null || data.storagePath is string) &&
+             data.lastModified is timestamp &&
+             (!('createdAt' in data) || data.createdAt is timestamp);
+    }
+
+    function isValidChat(data) {
+      return hasOnlyAllowedFields(['content', 'role', 'projectId', 'userId', 'timestamp', 'parts', 'toolCalls']) &&
+             data.content is string && data.content.size() < 10000 &&
+             data.role in ['user', 'assistant'] &&
+             data.projectId is string &&
+             data.userId is string && data.userId == request.auth.uid &&
+             data.timestamp is timestamp;
+    }
+
+    function isValidProjectFile(data) {
+      return hasOnlyAllowedFields(['path', 'content', 'ownerId']) &&
+             data.path is string && data.path.size() > 0 && data.path.size() < 1000 &&
+             data.content is string && data.content.size() < 1000000 && // 1MB limit
+             data.ownerId is string && data.ownerId == request.auth.uid;
+    }
+
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create: if isAuthenticated() && 
+                       isOwner(userId) && 
+                       isValidUser(request.resource.data) && 
+                       uidUnchanged() &&
+                       (request.resource.data.role == 'user' || isAdmin());
+      allow update: if isAuthenticated() && 
+                       isOwner(userId) && 
+                       isValidUser(request.resource.data) && 
+                       uidNotModified() &&
+                       request.resource.data.createdAt == resource.data.createdAt &&
+                       (request.resource.data.role == resource.data.role || isAdmin());
+      allow delete: if isAdmin();
+    }
+
+    match /sandbox_states/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create: if isAuthenticated() && isOwner(userId) && isValidSandboxState(request.resource.data);
+      allow update: if isAuthenticated() && isOwner(userId) && isValidSandboxState(request.resource.data);
+      allow delete: if isOwner(userId) || isAdmin();
+    }
+
+    match /analytics_events/{eventId} {
+      allow create: if true; // Anyone can track events
+      allow read: if isAdmin(); // Only admins can read analytics
+    }
+
+    match /projects/{projectId} {
+      allow read: if isAuthenticated() && (resource.data.ownerId == request.auth.uid || isAdmin());
+      allow create: if isAuthenticated() && isValidProject(request.resource.data);
+      allow update: if isAuthenticated() && 
+                       (resource.data.ownerId == request.auth.uid || isAdmin()) && 
+                       isValidProject(request.resource.data) &&
+                       request.resource.data.ownerId == resource.data.ownerId &&
+                       (!('createdAt' in resource.data) || request.resource.data.createdAt == resource.data.createdAt);
+      allow delete: if isAuthenticated() && (resource.data.ownerId == request.auth.uid || isAdmin());
+      
+      match /files/{fileId} {
+        allow read: if isAuthenticated() && (get(/databases/$(database)/documents/projects/$(projectId)).data.ownerId == request.auth.uid || isAdmin());
+        allow create: if isAuthenticated() && isValidProjectFile(request.resource.data);
+        allow update: if isAuthenticated() && (get(/databases/$(database)/documents/projects/$(projectId)).data.ownerId == request.auth.uid || isAdmin()) && isValidProjectFile(request.resource.data) && request.resource.data.ownerId == resource.data.ownerId;
+        allow delete: if isAuthenticated() && (get(/databases/$(database)/documents/projects/$(projectId)).data.ownerId == request.auth.uid || isAdmin());
+      }
+      
+      match /messages/{messageId} {
+        allow read: if isAuthenticated() && (get(/databases/$(database)/documents/projects/$(projectId)).data.ownerId == request.auth.uid || isAdmin());
+        allow create: if isAuthenticated() && (get(/databases/$(database)/documents/projects/$(projectId)).data.ownerId == request.auth.uid || isAdmin());
+        allow update: if isAuthenticated() && (get(/databases/$(database)/documents/projects/$(projectId)).data.ownerId == request.auth.uid || isAdmin());
+        allow delete: if isAuthenticated() && (get(/databases/$(database)/documents/projects/$(projectId)).data.ownerId == request.auth.uid || isAdmin());
+      }
+    }
+
+    match /chats/{chatId} {
+      allow read: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isAuthenticated() && isValidChat(request.resource.data);
+      allow delete: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+    }
+  }
+}

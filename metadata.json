@@ -1,0 +1,5 @@
+{
+  "name": "Remix: AI Tool Editor",
+  "description": "An AI-powered code editor with integrated tools for network requests, analytics, Stripe, security scans, and Supabase documentation search.",
+  "requestFramePermissions": ["microphone"]
+}
