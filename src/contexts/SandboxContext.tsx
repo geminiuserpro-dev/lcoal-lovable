@@ -329,18 +329,27 @@ export const SandboxProvider = ({ children }: { children: React.ReactNode }) => 
         .filter((p) => /\.(tsx?|jsx?|json|css|html|md|svg|yml|yaml|toml|env|txt|sh)$/i.test(p));
 
       const prefix = dir.endsWith("/") ? dir : dir + "/";
-      const toRead = filePaths.slice(0, 30);
-      const readPromises = toRead.map(async (fullPath) => {
+
+      // ── Phase 1: Instantly populate tree with empty placeholders ──────────
+      for (const fullPath of filePaths) {
+        const relativePath = fullPath.startsWith(prefix) ? fullPath.slice(prefix.length) : null;
+        if (relativePath) addOrUpdateFile(relativePath, "");
+      }
+
+      // ── Phase 2: Lazily read high-priority files in background ────────────
+      const priority = filePaths.filter(p =>
+        /\/(index\.(tsx?|jsx?|html)|App\.(tsx?|jsx?)|main\.(tsx?|jsx?)|package\.json|vite\.config\.(ts|js))$/.test(p)
+      ).slice(0, 10);
+
+      // Read priority files first, then the rest on demand
+      priority.map(async (fullPath) => {
         const relativePath = fullPath.startsWith(prefix) ? fullPath.slice(prefix.length) : null;
         if (!relativePath) return;
         try {
           const data = await readFile(sid, fullPath);
           addOrUpdateFile(relativePath, data.content);
-        } catch {
-          // skip binary/unreadable files
-        }
+        } catch { /* skip unreadable */ }
       });
-      await Promise.allSettled(readPromises);
     } catch (e) {
       console.error("Failed to load files:", e);
     }
@@ -2518,6 +2527,7 @@ Public URL: ${supabaseUrl}/storage/v1/object/public/${bucket}/${storagePath}`, s
         chatHistory,
         setChatHistory,
         projectId,
+        repoUrl: null,
       }}
     >
       {children}

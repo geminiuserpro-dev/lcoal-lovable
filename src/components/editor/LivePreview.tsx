@@ -195,7 +195,7 @@ const LivePreview = () => {
                 <iframe
                   key={iframeKey}
                   ref={iframeRef}
-                  src={previewUrl}
+                  src={previewUrl ?? undefined}
                   className="w-full h-full border-none"
                   title="Live Preview"
                   onLoad={handleIframeLoad}
@@ -203,6 +203,26 @@ const LivePreview = () => {
                   sandbox="allow-forms allow-modals allow-popups allow-presentation allow-same-origin allow-scripts"
                   allow="accelerometer; camera; encrypted-media; geolocation; gyroscope; microphone; midi; clipboard-read; clipboard-write"
                 />
+                {/* Proxy auth fallback — shown when iframe 400s due to Daytona OAuth cookie restrictions */}
+                {iframeError && previewUrl && (
+                  <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-4 bg-background/95 backdrop-blur-sm text-center p-6">
+                    <div className="w-12 h-12 rounded-2xl bg-primary/10 border border-primary/20 flex items-center justify-center">
+                      <ExternalLink size={20} className="text-primary/70" />
+                    </div>
+                    <div>
+                      <p className="text-sm font-semibold">Preview ready!</p>
+                      <p className="text-xs text-muted-foreground/70 mt-1 max-w-[260px] leading-relaxed">
+                        The Daytona preview requires browser auth. Open it in a new tab to complete sign-in.
+                      </p>
+                    </div>
+                    <button
+                      onClick={handleOpenNewTab}
+                      className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-primary text-primary-foreground text-xs font-semibold hover:opacity-90 transition-opacity"
+                    >
+                      <ExternalLink size={13} /> Open Preview
+                    </button>
+                  </div>
+                )}
               </motion.div>
 
               {device !== "desktop" && (

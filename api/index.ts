@@ -25,6 +25,8 @@ setInterval(() => {
 }, 5 * 60_000);
 
 let lastSandboxLogs = { install: "", vite: "", sandboxId: "" };
+const fileListCache = new Map<string, { result: string; ts: number }>();
+const FILE_LIST_TTL_MS = 30_000;
 
 const app = express();
 app.use(compression());
@@ -125,6 +127,7 @@ app.post("/api/daytona", async (req, res) => {
         const data = await sandbox.process.executeCommand(params.command);
         res.json({ result: data.result, exitCode: data.exitCode });
       } else if (action === "writeFile") {
+        fileListCache.delete(`${sandboxId}:/home/daytona/repo`); // invalidate on write
         const b64 = Buffer.from(params.content || "", "utf8").toString("base64");
         const data = await sandbox.process.executeCommand(`mkdir -p $(dirname '${params.filePath}') && printf '%s' '${b64}' | base64 -d > '${params.filePath}'`);
         res.json({ success: true, result: data.result, exitCode: data.exitCode });
@@ -133,16 +136,41 @@ app.post("/api/daytona", async (req, res) => {
         res.json({ content: Buffer.from(data.result || "", "base64").toString("utf8"), exitCode: data.exitCode });
       } else if (action === "listFiles") {
         const dir = params.dir || "/home/daytona/repo";
-        const data = await sandbox.process.executeCommand(`find ${dir} -maxdepth 5 -not -path '*/node_modules/*' -not -path '*/.git/*' -type f | head -200`);
+        const cacheKey = `${sandboxId}:${dir}`;
+        const cached = fileListCache.get(cacheKey);
+        if (cached && Date.now() - cached.ts < FILE_LIST_TTL_MS) {
+          return res.json({ result: cached.result, exitCode: 0, fromCache: true });
+        }
+        const data = await sandbox.process.executeCommand(
+          `find ${dir} -maxdepth 4 -not -path '*/node_modules/*' -not -path '*/.git/*' -not -path '*/dist/*' -not -path '*/.vite/*' -type f | sort | head -300`
+        );
+        fileListCache.set(cacheKey, { result: data.result || "", ts: Date.now() });
         res.json({ result: data.result || "", exitCode: data.exitCode });
       } else if (action === "startDevServer") {
         const port = params.port || 3000;
         const wd = "/home/daytona/repo";
-        
-        // No npm install - pure async execution per template
-        const data = await sandbox.process.executeCommand(`cd ${wd} && (npm run dev -- --port ${port} --host 0.0.0.0 > /tmp/vite.log 2>&1 &)`);
-        
-        // Fetch preview token if possible
+
+        // Wait for Toolbox to be network-ready before running any command
+        let ready = false;
+        let delay = 2000;
+        for (let i = 0; i < 10; i++) {
+          try {
+            await sandbox.process.executeCommand("echo ping");
+            ready = true;
+            break;
+          } catch (e: any) {
+            const isConnErr = e.name === "AggregateError" || (e.message || "").includes("Timeout");
+            console.warn(`[startDevServer] Toolbox check ${i+1}: ${isConnErr ? "Waiting..." : e.message}`);
+            await new Promise(r => setTimeout(r, delay));
+            delay = Math.min(delay * 1.5, 10000);
+          }
+        }
+        if (!ready) throw new Error("Sandbox Toolbox did not respond in time. Cannot start dev server.");
+
+        // Start dev server from a stable dir to avoid getcwd issues
+        const data = await sandbox.process.executeCommand(`mkdir -p ${wd} && cd ${wd} && (npm run dev -- --port ${port} --host 0.0.0.0 > /tmp/vite.log 2>&1 &)`);
+
+        // Fetch preview token
         let previewToken = "";
         try {
           const tokenUrl = `${process.env.DAYTONA_API_URL || "https://app.daytona.io/api"}/sandbox/${sandboxId}/preview-token`;
@@ -150,8 +178,7 @@ app.post("/api/daytona", async (req, res) => {
             headers: { "Authorization": `Bearer ${process.env.DAYTONA_API_KEY}` } 
           });
           if (tr.ok) {
-            const data = await tr.json();
-            previewToken = data.token || "";
+            previewToken = (await tr.json()).token || "";
           } else {
             console.error(`Token fetch failed: ${tr.status} ${tr.statusText}`);
           }
