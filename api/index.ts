@@ -2,8 +2,9 @@ import express from "express";
 import path from "path";
 import compression from "compression";
 import Stripe from "stripe";
+import { Daytona } from "@daytonaio/sdk";
 
-// ── Simple in-memory rate limiter ─────────────────────────────────────────────
+// ── Rate Limiter ─────────────────────────────────────────────────────────────
 const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
 function rateLimit(key: string, maxPerMinute: number): boolean {
   const now = Date.now();
@@ -45,23 +46,23 @@ function getStripe(): Stripe {
   return stripeClient;
 }
 
+// ── Daytona Client (SDK) ─────────────────────────────────────────────────────
+let daytonaClient: Daytona | null = null;
+function getDaytona(): Daytona {
+  if (!daytonaClient) {
+    const apiKey = process.env.DAYTONA_API_KEY;
+    const serverUrl = process.env.DAYTONA_SERVER_URL || "https://app.daytona.io/api";
+    if (!apiKey) throw new Error("DAYTONA_API_KEY is not set");
+    daytonaClient = new Daytona({ apiKey, target: serverUrl });
+  }
+  return daytonaClient;
+}
+
 app.get("/api/health", (req, res) => {
-  res.json({ status: "ok", env: process.env.NODE_ENV, vercel: !!process.env.VERCEL });
+  res.json({ status: "ok", env: process.env.NODE_ENV, sdk: "active" });
 });
 
-app.get("/api/debug-env", (req, res) => {
-  const mask = (key?: string) => key ? `${key.slice(0, 4)}...${key.slice(-4)}` : "MISSING";
-  res.json({
-    DAYTONA_API_KEY: mask(process.env.DAYTONA_API_KEY),
-    GEMINI_API_KEY: mask(process.env.GEMINI_API_KEY),
-    ANTHROPIC_API_KEY: mask(process.env.ANTHROPIC_API_KEY),
-    FIRECRAWL_API_KEY: mask(process.env.FIRECRAWL_API_KEY),
-    FIREBASE_PROJECT_ID: process.env.VITE_FIREBASE_PROJECT_ID ? "SET" : "MISSING",
-    FIREBASE_DB_ID: process.env.VITE_FIREBASE_FIRESTORE_DATABASE_ID ? "SET" : "MISSING",
-  });
-});
-
-// ── Daytona API Handler ──────────────────────────────────────────────────────
+// ── Daytona API Handler (Refactored to SDK) ──────────────────────────────────
 app.post("/api/daytona", async (req, res) => {
   const ipHeader = req.headers["x-forwarded-for"];
   const ipRaw = Array.isArray(ipHeader) ? ipHeader[0] : (ipHeader as string || (req as any).ip || "unknown");
@@ -70,122 +71,72 @@ app.post("/api/daytona", async (req, res) => {
 
   try {
     const { action, ...params } = req.body;
-    const DAYTONA_API_KEY = process.env.DAYTONA_API_KEY;
-    const DAYTONA_API = process.env.DAYTONA_SERVER_URL || "https://app.daytona.io/api";
+    const daytona = getDaytona();
+    const { sandboxId } = params;
     const SNAPSHOT_NAME = process.env.SNAPSHOT_NAME;
-    if (!DAYTONA_API_KEY) throw new Error("DAYTONA_API_KEY is not set");
-
-    const authHeaders = { "Authorization": `Bearer ${DAYTONA_API_KEY}`, "Content-Type": "application/json" };
-    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-    const getToolboxProxyUrl = async (sid: string) => {
-      const resp = await fetch(`${DAYTONA_API}/sandbox/${sid}`, { headers: authHeaders });
-      const data = await resp.json();
-      let url = data.toolboxProxyUrl || "https://proxy.app.daytona.io/toolbox";
-      if (url.endsWith("/")) url = url.slice(0, -1);
-      return url;
-    };
-
-    const runToolboxCommand = async (sid: string, cmd: string, opts?: any) => {
-      const retries = opts?.retries ?? 5;
-      const delay = opts?.retryDelayMs ?? 1000;
-      let lastErr: any = "Unknown error";
-      for (let i = 0; i < retries; i++) {
-        try {
-          const proxyUrl = await getToolboxProxyUrl(sid);
-          const resp = await fetch(`${proxyUrl}/${sid}/process/execute`, {
-            method: "POST", headers: authHeaders, body: JSON.stringify({ command: cmd }),
-          });
-          if (resp.ok) return await resp.json();
-          lastErr = new Error(`Toolbox error: ${resp.status} ${await resp.text()}`);
-        } catch (e) { lastErr = e; }
-        if (i < retries - 1) await sleep(delay);
-      }
-      throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
-    };
-
-    const runShellCommand = (sid: string, cmd: string, opts?: any) => 
-      runToolboxCommand(sid, `/bin/sh -lc '${cmd.replace(/'/g, "'\\''")}'`, opts);
-
-    const { sandboxId, command, filePath, content, workDir: workDirInput = "/home/daytona" } = params;
-    
-    // Robust directory finding: try input workDir, then fallback to common Daytona paths
-    const findWorkDir = `
-      if [ -d "${workDirInput}/repo" ]; then echo "${workDirInput}/repo";
-      elif [ -d "/home/daytona/repo" ]; then echo "/home/daytona/repo";
-      elif [ -d "/project/repo" ]; then echo "/project/repo";
-      else echo "${workDirInput}"; fi
-    `.trim();
 
     if (action === "create") {
-      const body: any = { language: params.language || "typescript", isEphemeral: true };
-      if (SNAPSHOT_NAME) {
-        body.snapshot = SNAPSHOT_NAME;
-      }
-      const resp = await fetch(`${DAYTONA_API}/sandbox`, {
-        method: "POST", headers: authHeaders,
-        body: JSON.stringify(body),
-      });
-      const data = await resp.json();
-      res.json({ sandboxId: data.id, status: data.state });
-    } else if (action === "execute") {
-      const data = await runShellCommand(sandboxId, command);
-      res.json({ result: data.result, exitCode: data.exitCode });
-    } else if (action === "writeFile") {
-      const b64 = Buffer.from(content || "", "utf8").toString("base64");
-      const data = await runShellCommand(sandboxId, `mkdir -p $(dirname '${filePath}') && printf '%s' '${b64}' | base64 -d > '${filePath}'`);
-      res.json({ success: true, result: data.result, exitCode: data.exitCode });
-    } else if (action === "readFile") {
-      const data = await runShellCommand(sandboxId, `base64 -w 0 '${filePath}'`);
-      res.json({ content: Buffer.from(data.result || "", "base64").toString("utf8"), exitCode: data.exitCode });
-    } else if (action === "cloneRepo") {
-      // Clone to a predictable 'repo' subdirectory inside the workdir
-      const data = await runShellCommand(sandboxId, `mkdir -p ${workDirInput} && rm -rf ${workDirInput}/repo && git clone --depth 1 ${params.repoUrl} ${workDirInput}/repo`);
-      res.json({ success: true, result: data.result, exitCode: data.exitCode });
+      // Use Snapshot as Primary, remove Repo URL requirement
+      if (!SNAPSHOT_NAME) throw new Error("SNAPSHOT_NAME is required in .env for this project.");
+      
+      const sandbox = await daytona.create({
+        snapshot: SNAPSHOT_NAME,
+        language: params.language || "typescript",
+        isEphemeral: true
+      } as any);
+      
+      res.json({ sandboxId: sandbox.id, status: "ready" });
     } else if (action === "health") {
-      const resp = await fetch(`${DAYTONA_API}/sandbox/${sandboxId}`, { headers: authHeaders });
-      const data = await resp.json();
-      res.json({ status: data.state });
-    } else if (action === "listFiles") {
-      const wdResolved = (await runShellCommand(sandboxId, findWorkDir)).result.trim();
-      const data = await runShellCommand(sandboxId, `find ${wdResolved} -maxdepth 5 -not -path '*/node_modules/*' -not -path '*/.git/*' -type f | head -200`);
-      res.json({ result: data.result || "", exitCode: data.exitCode });
-    } else if (action === "startDevServer") {
-      const port = params.port || 3000;
-      const wdResolved = (await runShellCommand(sandboxId, findWorkDir)).result.trim();
-      let previewToken = "";
-      try {
-        const tr = await fetch(`${DAYTONA_API}/sandbox/${sandboxId}/preview-token`, { headers: authHeaders });
-        if (tr.ok) {
-          const td = await tr.json();
-          previewToken = td.token || "";
-        }
-      } catch (e) {
-        console.error("Token fetch fail:", e);
-      }
-      const data = await runShellCommand(sandboxId, `cd ${wdResolved} && npm install --legacy-peer-deps && (npx vite --host 0.0.0.0 --port ${port} > /tmp/vite.log 2>&1 &)`);
-      res.json({ 
-        previewUrl: `https://${port}-${sandboxId}.proxy.daytona.works`, 
-        previewToken, 
-        serverReady: true, 
-        installLog: data.result, 
-        viteLog: data.result, 
-        exitCode: data.exitCode 
-      });
-    } else if (action === "setupWatcher") {
-      const wdResolved = (await runShellCommand(sandboxId, findWorkDir)).result.trim();
-      const cmd = params.command || "npm run build";
-      await runShellCommand(sandboxId, `cd ${wdResolved} && (npx chokidar '${params.watchDir || "src"}' -c '${cmd}' > /tmp/watcher.log 2>&1 &)`);
-      res.json({ success: true });
-    } else if (action === "searchFiles") {
-      const wdResolved = (await runShellCommand(sandboxId, findWorkDir)).result.trim();
-      const data = await runShellCommand(sandboxId, `grep -rIl "${params.query}" ${wdResolved} | head -50`);
-      res.json({ result: data.result, exitCode: data.exitCode });
-    } else if (action === "getLogs") {
-      const data = await runShellCommand(sandboxId, `tail -n 100 /tmp/vite.log || echo "No logs"`);
-      res.json({ result: data.result, exitCode: data.exitCode });
+      const sandbox = await daytona.get(sandboxId);
+      res.json({ status: "ready" }); // Simplified for SDK
     } else {
-      res.status(400).json({ error: `Unknown action: ${action}` });
+      const sandbox = await daytona.get(sandboxId);
+      
+      if (action === "execute") {
+        const data = await sandbox.process.executeCommand(params.command);
+        res.json({ result: data.result, exitCode: data.exitCode });
+      } else if (action === "writeFile") {
+        const b64 = Buffer.from(params.content || "", "utf8").toString("base64");
+        const data = await sandbox.process.executeCommand(`mkdir -p $(dirname '${params.filePath}') && printf '%s' '${b64}' | base64 -d > '${params.filePath}'`);
+        res.json({ success: true, result: data.result, exitCode: data.exitCode });
+      } else if (action === "readFile") {
+        const data = await sandbox.process.executeCommand(`base64 -w 0 '${params.filePath}'`);
+        res.json({ content: Buffer.from(data.result || "", "base64").toString("utf8"), exitCode: data.exitCode });
+      } else if (action === "listFiles") {
+        const dir = params.dir || "/home/daytona/repo";
+        const data = await sandbox.process.executeCommand(`find ${dir} -maxdepth 5 -not -path '*/node_modules/*' -not -path '*/.git/*' -type f | head -200`);
+        res.json({ result: data.result || "", exitCode: data.exitCode });
+      } else if (action === "startDevServer") {
+        const port = params.port || 3000;
+        const wd = "/home/daytona/repo";
+        
+        // No npm install - pure async execution per template
+        const data = await sandbox.process.executeCommand(`cd ${wd} && (npm run dev -- --port ${port} --host 0.0.0.0 > /tmp/vite.log 2>&1 &)`);
+        
+        let previewToken = "";
+        try {
+          const tr = await fetch(`${process.env.DAYTONA_SERVER_URL || "https://app.daytona.io/api"}/sandbox/${sandboxId}/preview-token`, { 
+            headers: { "Authorization": `Bearer ${process.env.DAYTONA_API_KEY}` } 
+          });
+          if (tr.ok) previewToken = (await tr.json()).token || "";
+        } catch (e) {}
+
+        res.json({ 
+          previewUrl: `https://${port}-${sandboxId}.proxy.daytona.works`,
+          previewToken,
+          serverReady: true,
+          installLog: "Quick Start: Skipping npm install",
+          viteLog: data.result
+        });
+      } else if (action === "getLogs") {
+        const data = await sandbox.process.executeCommand(`tail -n 100 /tmp/vite.log || echo "No logs"`);
+        res.json({ result: data.result, exitCode: data.exitCode });
+      } else if (action === "searchFiles") {
+        const data = await sandbox.process.executeCommand(`grep -rIl "${params.query}" /home/daytona/repo | head -50`);
+        res.json({ result: data.result, exitCode: data.exitCode });
+      } else {
+        res.status(400).json({ error: `Unknown action: ${action}` });
+      }
     }
   } catch (e: any) {
     res.status(500).json({ error: e.message });

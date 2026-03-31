@@ -22,6 +22,7 @@ import { ChatMessage, ToolCall } from "@/lib/tools";
 import { ChatMsg } from "@/lib/ai-chat";
 import { SandboxFile, TreeNode } from "../types";
 import { useStore } from "../store/store";
+import { useFirebase } from "../components/FirebaseProvider";
 
 interface SandboxContextType {
   sandboxId: string | null;
@@ -43,7 +44,6 @@ interface SandboxContextType {
   saveFile: (path: string, content: string) => Promise<void>;
   deleteFile: (path: string) => Promise<void>;
   createFolder: (path: string) => Promise<void>;
-  cloneAndLoad: (repoUrl: string) => Promise<void>;
   loadFromProject: (projectId: string) => Promise<void>;
   setProjectId: (id: string | null) => void;
   projectName: string;
@@ -56,6 +56,7 @@ interface SandboxContextType {
   setChatHistory: (history: ChatMsg[] | ((prev: ChatMsg[]) => ChatMsg[])) => void;
   ensureSandbox: () => Promise<string>;
   startPreview: () => Promise<string>;
+  initializeSandbox: () => Promise<void>;
   executeToolCall: (toolCall: ToolCall) => Promise<{ result: string; success: boolean }>;
   destroySandbox: () => Promise<void>;
   cleanupSandboxes: () => Promise<void>;
@@ -109,6 +110,7 @@ function buildFileTree(files: Map<string, SandboxFile>): TreeNode[] {
 }
 
 export const SandboxProvider = ({ children }: { children: React.ReactNode }) => {
+  const { user } = useFirebase();
   const {
     sandboxId, setSandboxId,
     status, setStatus,
@@ -120,7 +122,7 @@ export const SandboxProvider = ({ children }: { children: React.ReactNode }) => 
     previewStatus, setPreviewStatus,
     fileVersion,
     workDir, setWorkDir,
-    repoUrl, setRepoUrl,
+    snapshotName, setSnapshotName,
     projectId, setProjectId,
     projectName, setProjectName,
     view, setView,
@@ -135,8 +137,10 @@ export const SandboxProvider = ({ children }: { children: React.ReactNode }) => 
   const workDirRef = useRef(workDir);
   useEffect(() => { workDirRef.current = workDir; }, [workDir]);
 
-  const filesRef = useRef<Map<string, SandboxFile>>(files);
-  useEffect(() => { filesRef.current = files; }, [files]);
+  const latestState = useRef({ files, projectId, projectName, snapshotName, user });
+  useEffect(() => {
+    latestState.current = { files, projectId, projectName, snapshotName, user };
+  }, [files, projectId, projectName, snapshotName, user]);
 
   const previewStatusRef = useRef(previewStatus);
   useEffect(() => { previewStatusRef.current = previewStatus; }, [previewStatus]);
@@ -367,7 +371,6 @@ export const SandboxProvider = ({ children }: { children: React.ReactNode }) => 
         }
 
         setFiles(newFiles);
-        setRepoUrl(project.repoUrl);
         setProjectId(project.id);
         setStatus("ready");
         toast.success("Project loaded!");
@@ -378,59 +381,6 @@ export const SandboxProvider = ({ children }: { children: React.ReactNode }) => 
       toast.error("Load failed: " + (e instanceof Error ? e.message : "Unknown error"));
     }
   }, [withSandboxRetry]);
-
-  const cloneAndLoad = useCallback(async (repoUrl: string) => {
-    setRepoUrl(repoUrl);
-    setStatus("creating");
-    try {
-      await withSandboxRetry(async (sid) => {
-        await cloneRepo(sid, repoUrl);
-
-        // Auto-detect working directory by finding package.json
-        let detectedDir = "/home/daytona/repo";
-        try {
-          const checkRes = await executeCommand(sid, "find /home/daytona/repo -maxdepth 2 -name package.json -not -path '*/node_modules/*' -type f 2>/dev/null | head -1");
-          const output = (checkRes.result || "").trim();
-          if (output && output.endsWith("/package.json")) {
-            detectedDir = output.replace(/\/package\.json$/, "");
-          }
-        } catch { }
-
-        setWorkDir(detectedDir);
-        workDirRef.current = detectedDir;
-        console.log("Auto-detected workDir:", detectedDir);
-
-        // Install dependencies
-        try {
-          console.log("Installing dependencies...");
-          await executeCommand(sid, `cd ${detectedDir} && npm install 2>&1 | tail -20`);
-          console.log("Dependencies installed.");
-        } catch (e) {
-          console.warn("npm install failed:", e);
-        }
-
-        await loadFilesFromSandbox(sid, detectedDir);
-        setStatus("ready");
-
-        // Auto-start dev server after clone
-        try {
-          setPreviewStatus("starting");
-          const result = await startDevServer(sid, 3000, detectedDir);
-          console.log("Dev server auto-started:", result);
-          setPreviewUrl(result.previewUrl);
-          setPreviewStatus("running");
-        } catch (e) {
-          console.warn("Auto-start dev server failed:", e);
-          setPreviewStatus("error");
-        }
-      });
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "Clone failed";
-      setError(msg);
-      setStatus("error");
-      throw e;
-    }
-  }, [withSandboxRetry, loadFilesFromSandbox]);
 
   const startPreview = useCallback(async (): Promise<string> => {
     setPreviewStatus("starting");
@@ -474,6 +424,28 @@ export const SandboxProvider = ({ children }: { children: React.ReactNode }) => 
       throw e;
     }
   }, [withSandboxRetry]);
+
+  const initializeSandbox = useCallback(async () => {
+    setStatus("creating");
+    try {
+      const sid = await ensureSandbox();
+      
+      // 1. First Read Files (Instantly populate UI)
+      console.log("Reading files from sandbox...");
+      await loadFilesFromSandbox(sid, "/home/daytona/repo");
+      setStatus("ready");
+
+      // 2. Then Preview URL (Start dev server in background on port 3000)
+      console.log("Starting dev server on port 3000...");
+      startPreview().catch(e => console.warn("Background preview start failed:", e));
+      
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Initialization failed";
+      setError(msg);
+      setStatus("error");
+      throw e;
+    }
+  }, [ensureSandbox, loadFilesFromSandbox, startPreview]);
 
   const destroySandbox = useCallback(async () => {
     const sid = sandboxIdRef.current;
@@ -654,20 +626,20 @@ export const SandboxProvider = ({ children }: { children: React.ReactNode }) => 
         // AI gateway
         "ai_gateway--enable": "ai_gateway__enable",
         // Supabase advanced
-        "supabase--migration": "supabase__migration",
-        "supabase--read_query": "supabase__read_query",
-        "supabase--insert": "supabase__insert",
-        "supabase--analytics_query": "supabase__analytics_query",
-        "supabase--configure_auth": "supabase__configure_auth",
-        "supabase--configure_social_auth": "supabase__configure_social_auth",
-        "supabase--deploy_edge_functions": "supabase__deploy_edge_functions",
-        "supabase--delete_edge_functions": "supabase__delete_edge_functions",
-        "supabase--curl_edge_functions": "supabase__curl_edge_functions",
-        "supabase--edge_function_logs": "supabase__edge_function_logs",
-        "supabase--test_edge_functions": "supabase__test_edge_functions",
-        "supabase--linter": "supabase__linter",
-        "supabase--project_info": "supabase__project_info",
-        "supabase--storage_upload": "supabase__storage_upload",
+        "supabase--migration": "supabase--migration",
+        "supabase--read_query": "supabase--read_query",
+        "supabase--insert": "supabase--insert",
+        "supabase--analytics_query": "supabase--analytics_query",
+        "supabase--configure_auth": "supabase--configure_auth",
+        "supabase--configure_social_auth": "supabase--configure_social_auth",
+        "supabase--deploy_edge_functions": "supabase--deploy_edge_functions",
+        "supabase--delete_edge_functions": "supabase--delete_edge_functions",
+        "supabase--curl_edge_functions": "supabase--curl_edge_functions",
+        "supabase--edge_function_logs": "supabase--edge_function_logs",
+        "supabase--test_edge_functions": "supabase--test_edge_functions",
+        "supabase--linter": "supabase--linter",
+        "supabase--project_info": "supabase--project_info",
+        "supabase--storage_upload": "supabase--storage_upload",
         "supabase--docs-search": "supabase__docs_search",
         "supabase--docs-get": "supabase__docs_get",
         // Security
@@ -2529,7 +2501,7 @@ Public URL: ${supabaseUrl}/storage/v1/object/public/${bucket}/${storagePath}`, s
         saveFile,
         deleteFile,
         createFolder,
-        cloneAndLoad,
+        initializeSandbox,
         ensureSandbox,
         startPreview,
         executeToolCall,
@@ -2545,7 +2517,6 @@ Public URL: ${supabaseUrl}/storage/v1/object/public/${bucket}/${storagePath}`, s
         setMessages,
         chatHistory,
         setChatHistory,
-        repoUrl,
         projectId,
       }}
     >

@@ -3,7 +3,7 @@ import { SandboxFile, Project } from '../types';
 import { collection, doc, setDoc, getDoc, getDocs, deleteDoc, query, where, orderBy, serverTimestamp, writeBatch } from 'firebase/firestore';
 
 export const ProjectService = {
-  async saveProject(name: string, description: string, repoUrl: string | null, files: Map<string, SandboxFile>, existingProjectId?: string) {
+  async saveProject(name: string, description: string, snapshotName: string | null, files: Map<string, SandboxFile>, existingProjectId?: string) {
     if (!auth.currentUser) throw new Error("User must be authenticated to save projects.");
     const userId = auth.currentUser.uid;
     
@@ -42,7 +42,7 @@ export const ProjectService = {
       name,
       description: description || null,
       ownerId: userId,
-      repoUrl: repoUrl || null,
+      snapshotName: snapshotName || null,
       lastModified: serverTimestamp(),
     };
     

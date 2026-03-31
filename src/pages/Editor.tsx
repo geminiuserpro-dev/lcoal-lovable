@@ -22,9 +22,8 @@ const EditorInner = () => {
   const {
     startPreview,
     previewStatus,
-    cloneAndLoad,
+    initializeSandbox,
     status,
-    repoUrl: currentRepoUrl,
     destroySandbox,
     cleanupSandboxes,
     files,
@@ -48,12 +47,12 @@ const EditorInner = () => {
   const [searchParams, setSearchParams] = useSearchParams();
   const projectIdFromUrl = searchParams.get("project");
 
-  const latestState = useRef({ files, projectId, projectName, currentRepoUrl, user });
+  const latestState = useRef({ files, projectId, projectName, user });
   const lastSavedFilesRef = useRef<Map<string, any>>(new Map());
 
   useEffect(() => {
-    latestState.current = { files, projectId, projectName, currentRepoUrl, user };
-  }, [files, projectId, projectName, currentRepoUrl, user]);
+    latestState.current = { files, projectId, projectName, user };
+  }, [files, projectId, projectName, user]);
 
   useEffect(() => {
     const autoSaveInterval = setInterval(async () => {
@@ -221,16 +220,15 @@ const EditorInner = () => {
       }
 
       try {
-        const REPO_URL = "https://github.com/geminiuserpro-dev/do-nothing-comfort";
-        await cloneAndLoad(REPO_URL);
-        toast.success("Repository cloned into sandbox!");
+        await initializeSandbox();
+        toast.success("Sandbox initialized from snapshot!");
       } catch (e) {
-        toast.error("Clone failed: " + (e instanceof Error ? e.message : "Unknown error"));
+        toast.error("Initialization failed: " + (e instanceof Error ? e.message : "Unknown error"));
       }
     };
 
     init();
-  }, [initialized, cloneAndLoad, projectIdFromUrl, loadFromProject]);
+  }, [initialized, initializeSandbox, projectIdFromUrl, loadFromProject]);
 
   const handleRunAll = async () => {
     setView("preview");

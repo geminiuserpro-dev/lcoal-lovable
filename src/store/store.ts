@@ -32,8 +32,8 @@ interface StoreState {
   workDir: string;
   setWorkDir: (dir: string) => void;
   
-  repoUrl: string | null;
-  setRepoUrl: (url: string | null) => void;
+  snapshotName: string | null;
+  setSnapshotName: (url: string | null) => void;
   
   projectId: string | null;
   setProjectId: (id: string | null) => void;
@@ -64,7 +64,7 @@ const initialState = {
   previewStatus: "idle" as const,
   fileVersion: 0,
   workDir: "/project",
-  repoUrl: null,
+  snapshotName: null,
   projectId: null,
   projectName: null,
   view: "code" as const,
@@ -116,7 +116,7 @@ export const useStore = create<StoreState>((set) => ({
   setPreviewStatus: (status) => set({ previewStatus: status }),
   
   setWorkDir: (dir) => set({ workDir: dir }),
-  setRepoUrl: (url) => set({ repoUrl: url }),
+  setSnapshotName: (url) => set({ snapshotName: url }),
   setProjectId: (id) => set({ projectId: id }),
   setProjectName: (name) => set({ projectName: name }),
   setView: (view) => set({ view }),
