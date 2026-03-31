@@ -72,6 +72,7 @@ app.post("/api/daytona", async (req, res) => {
     const { action, ...params } = req.body;
     const DAYTONA_API_KEY = process.env.DAYTONA_API_KEY;
     const DAYTONA_API = process.env.DAYTONA_SERVER_URL || "https://app.daytona.io/api";
+    const SNAPSHOT_NAME = process.env.SNAPSHOT_NAME;
     if (!DAYTONA_API_KEY) throw new Error("DAYTONA_API_KEY is not set");
 
     const authHeaders = { "Authorization": `Bearer ${DAYTONA_API_KEY}`, "Content-Type": "application/json" };
@@ -117,9 +118,13 @@ app.post("/api/daytona", async (req, res) => {
     `.trim();
 
     if (action === "create") {
+      const body: any = { language: params.language || "typescript", isEphemeral: true };
+      if (SNAPSHOT_NAME) {
+        body.snapshot = SNAPSHOT_NAME;
+      }
       const resp = await fetch(`${DAYTONA_API}/sandbox`, {
         method: "POST", headers: authHeaders,
-        body: JSON.stringify({ language: params.language || "typescript", isEphemeral: true }),
+        body: JSON.stringify(body),
       });
       const data = await resp.json();
       res.json({ sandboxId: data.id, status: data.state });
@@ -146,7 +151,7 @@ app.post("/api/daytona", async (req, res) => {
       const data = await runShellCommand(sandboxId, `find ${wdResolved} -maxdepth 5 -not -path '*/node_modules/*' -not -path '*/.git/*' -type f | head -200`);
       res.json({ result: data.result || "", exitCode: data.exitCode });
     } else if (action === "startDevServer") {
-      const port = params.port || 5173;
+      const port = params.port || 3000;
       const wdResolved = (await runShellCommand(sandboxId, findWorkDir)).result.trim();
       let previewToken = "";
       try {
