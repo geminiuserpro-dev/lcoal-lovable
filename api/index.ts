@@ -24,6 +24,8 @@ setInterval(() => {
   }
 }, 5 * 60_000);
 
+let lastSandboxLogs = { install: "", vite: "", sandboxId: "" };
+
 const app = express();
 app.use(compression());
 
@@ -51,15 +53,41 @@ let daytonaClient: Daytona | null = null;
 function getDaytona(): Daytona {
   if (!daytonaClient) {
     const apiKey = process.env.DAYTONA_API_KEY;
-    const serverUrl = process.env.DAYTONA_SERVER_URL || "https://app.daytona.io/api";
+    const apiUrl = process.env.DAYTONA_API_URL || "https://app.daytona.io/api";
+    const target = process.env.DAYTONA_TARGET || "us";
     if (!apiKey) throw new Error("DAYTONA_API_KEY is not set");
-    daytonaClient = new Daytona({ apiKey, target: serverUrl });
+    daytonaClient = new Daytona({ apiKey, apiUrl, target });
   }
   return daytonaClient;
 }
 
 app.get("/api/health", (req, res) => {
-  res.json({ status: "ok", env: process.env.NODE_ENV, sdk: "active" });
+  res.json({ status: "ok", env: process.env.NODE_ENV, sdk: "active", vercel: !!process.env.VERCEL });
+});
+
+app.get("/api/sandbox-logs", (req, res) => {
+  res.json(lastSandboxLogs);
+});
+
+app.get("/api/sandboxes", async (req, res) => {
+  try {
+    const daytona = getDaytona();
+    const list = await daytona.list();
+    res.json(list);
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get("/api/debug-env", (req, res) => {
+  const mask = (key?: string) => key ? `${key.slice(0, 4)}...${key.slice(-4)}` : "MISSING";
+  res.json({
+    DAYTONA_API_KEY: mask(process.env.DAYTONA_API_KEY),
+    GEMINI_API_KEY: mask(process.env.GEMINI_API_KEY),
+    STRIPE_SECRET_KEY: mask(process.env.STRIPE_SECRET_KEY),
+    FIRECRAWL_API_KEY: mask(process.env.FIRECRAWL_API_KEY),
+    SNAPSHOT_NAME: process.env.SNAPSHOT_NAME || "NOT_SET"
+  });
 });
 
 // ── Daytona API Handler (Refactored to SDK) ──────────────────────────────────
@@ -115,18 +143,24 @@ app.post("/api/daytona", async (req, res) => {
         
         let previewToken = "";
         try {
-          const tr = await fetch(`${process.env.DAYTONA_SERVER_URL || "https://app.daytona.io/api"}/sandbox/${sandboxId}/preview-token`, { 
+          const tr = await fetch(`${process.env.DAYTONA_API_URL || "https://app.daytona.io/api"}/sandbox/${sandboxId}/preview-token`, { 
             headers: { "Authorization": `Bearer ${process.env.DAYTONA_API_KEY}` } 
           });
           if (tr.ok) previewToken = (await tr.json()).token || "";
         } catch (e) {}
 
+        lastSandboxLogs = { 
+          install: "Quick Start: Skipping npm install", 
+          vite: data.result || "Vite started in background", 
+          sandboxId: sandboxId 
+        };
+
         res.json({ 
           previewUrl: `https://${port}-${sandboxId}.proxy.daytona.works`,
           previewToken,
           serverReady: true,
-          installLog: "Quick Start: Skipping npm install",
-          viteLog: data.result
+          installLog: lastSandboxLogs.install,
+          viteLog: lastSandboxLogs.vite
         });
       } else if (action === "getLogs") {
         const data = await sandbox.process.executeCommand(`tail -n 100 /tmp/vite.log || echo "No logs"`);
@@ -134,11 +168,44 @@ app.post("/api/daytona", async (req, res) => {
       } else if (action === "searchFiles") {
         const data = await sandbox.process.executeCommand(`grep -rIl "${params.query}" /home/daytona/repo | head -50`);
         res.json({ result: data.result, exitCode: data.exitCode });
+      } else if (action === "cloneRepo") {
+        const repoUrl = (params.repoUrl as string || "").trim();
+        if (!repoUrl) throw new Error("repoUrl is required");
+        const tmpDir = `/home/daytona/repo_tmp_${Date.now()}`;
+        const cloneCmd = `mkdir -p /home/daytona && rm -rf ${tmpDir} && git clone --depth 1 ${repoUrl} ${tmpDir} && rm -rf /home/daytona/repo && mv ${tmpDir} /home/daytona/repo`;
+        const data = await sandbox.process.executeCommand(cloneCmd);
+        res.json({ result: data.result || "Cloned successfully", exitCode: data.exitCode });
+      } else if (action === "stop") {
+        await sandbox.stop();
+        res.json({ success: true });
+      } else if (action === "start") {
+        await sandbox.start();
+        res.json({ success: true });
+      } else if (action === "delete") {
+        await daytona.delete(sandbox);
+        res.json({ success: true });
+      } else if (action === "deleteAll") {
+        const list = await daytona.list();
+        const items = (list as any).items || [];
+        await Promise.allSettled(items.map((s: any) => daytona.delete(s)));
+        res.json({ success: true, deletedCount: items.length });
+      } else if (action === "setupWatcher") {
+        const wd = "/home/daytona/repo";
+        const command = params.command || "npm run build";
+        const watchCmd = `cd ${wd} && (npx -y nodemon --watch . --ext ts,tsx,js,jsx,css,html --exec "${command}" > /tmp/watcher.log 2>&1 &)`;
+        const data = await sandbox.process.executeCommand(watchCmd);
+        res.json({ success: true, message: "Watcher started", result: data.result });
+      } else if (action === "addSecret") {
+        const { secretName, secretValue } = params;
+        const envCmd = `echo "${secretName}=${secretValue}" >> /home/daytona/repo/.env`;
+        await sandbox.process.executeCommand(envCmd);
+        res.json({ success: true, message: `Secret ${secretName} added.` });
       } else {
         res.status(400).json({ error: `Unknown action: ${action}` });
       }
     }
   } catch (e: any) {
+    console.error("Daytona API Error:", e);
     res.status(500).json({ error: e.message });
   }
 });
