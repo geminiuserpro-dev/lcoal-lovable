@@ -101,19 +101,20 @@ app.post("/api/daytona", async (req, res) => {
     const { action, ...params } = req.body;
     const daytona = getDaytona();
     const { sandboxId } = params;
-    const SNAPSHOT_NAME = process.env.SNAPSHOT_NAME;
 
     if (action === "create") {
-      // Use Snapshot as Primary, remove Repo URL requirement
-      if (!SNAPSHOT_NAME) throw new Error("SNAPSHOT_NAME is required in .env for this project.");
-      
+      const platform = (params.platform as string) || "web";
+      const snapshot = process.env.SNAPSHOT_NAME || "template-repo-snapshot-v2";
       const sandbox = await daytona.create({
-        snapshot: SNAPSHOT_NAME,
-        language: params.language || "typescript",
-        isEphemeral: true
-      } as any);
+        snapshot: snapshot,
+        labels: { platform }
+      });
       
-      res.json({ sandboxId: sandbox.id, status: "ready" });
+      // Add minimal delay for toolbox to breathe
+      console.log(`Sandbox ${sandbox.id} created. Waiting for network...`);
+      await new Promise(r => setTimeout(r, 5000));
+      
+      res.json({ sandboxId: sandbox.id });
     } else if (action === "health") {
       const sandbox = await daytona.get(sandboxId);
       res.json({ status: "ready" }); // Simplified for SDK
@@ -141,13 +142,22 @@ app.post("/api/daytona", async (req, res) => {
         // No npm install - pure async execution per template
         const data = await sandbox.process.executeCommand(`cd ${wd} && (npm run dev -- --port ${port} --host 0.0.0.0 > /tmp/vite.log 2>&1 &)`);
         
+        // Fetch preview token if possible
         let previewToken = "";
         try {
-          const tr = await fetch(`${process.env.DAYTONA_API_URL || "https://app.daytona.io/api"}/sandbox/${sandboxId}/preview-token`, { 
+          const tokenUrl = `${process.env.DAYTONA_API_URL || "https://app.daytona.io/api"}/sandbox/${sandboxId}/preview-token`;
+          const tr = await fetch(tokenUrl, { 
             headers: { "Authorization": `Bearer ${process.env.DAYTONA_API_KEY}` } 
           });
-          if (tr.ok) previewToken = (await tr.json()).token || "";
-        } catch (e) {}
+          if (tr.ok) {
+            const data = await tr.json();
+            previewToken = data.token || "";
+          } else {
+            console.error(`Token fetch failed: ${tr.status} ${tr.statusText}`);
+          }
+        } catch (e) {
+          console.error("Failed to fetch preview token:", e);
+        }
 
         lastSandboxLogs = { 
           install: "Quick Start: Skipping npm install", 
@@ -171,8 +181,26 @@ app.post("/api/daytona", async (req, res) => {
       } else if (action === "cloneRepo") {
         const repoUrl = (params.repoUrl as string || "").trim();
         if (!repoUrl) throw new Error("repoUrl is required");
+        
+        // Robust polling for network-readiness (Daytona Toolbox)
+        let ready = false;
+        let delay = 2000;
+        for (let i = 0; i < 10; i++) {
+          try {
+            await sandbox.process.executeCommand("echo ping");
+            ready = true;
+            break;
+          } catch (e: any) {
+            const isConnErr = e.name === "AggregateError" || e.message.includes("Timeout");
+            console.warn(`Sandbox connectivity check ${i+1}: ${isConnErr ? "Waiting for Toolbox..." : e.message}`);
+            await new Promise(r => setTimeout(r, delay));
+            delay = Math.min(delay * 1.5, 10000); // Exponential backoff max 10s
+          }
+        }
+        if (!ready) throw new Error("Sandbox Toolbox failed to respond. Network stability issues detected.");
+
         const tmpDir = `/home/daytona/repo_tmp_${Date.now()}`;
-        const cloneCmd = `mkdir -p /home/daytona && rm -rf ${tmpDir} && git clone --depth 1 ${repoUrl} ${tmpDir} && rm -rf /home/daytona/repo && mv ${tmpDir} /home/daytona/repo`;
+        const cloneCmd = `cd /home/daytona && git clone --depth 1 ${repoUrl} ${tmpDir} && rm -rf /home/daytona/repo && mv ${tmpDir} /home/daytona/repo`;
         const data = await sandbox.process.executeCommand(cloneCmd);
         res.json({ result: data.result || "Cloned successfully", exitCode: data.exitCode });
       } else if (action === "stop") {
