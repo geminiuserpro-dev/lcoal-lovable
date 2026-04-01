@@ -28,12 +28,6 @@ const LivePreview = () => {
   const consoleRef = useRef<HTMLDivElement>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
 
-  // Route through our proxy to add X-Daytona-Skip-Preview-Warning header server-side,
-  // which prevents the Daytona warning page (with its HTTP form action Mixed Content error)
-  const iframeSrc = useMemo(() => {
-    if (!previewUrl) return undefined;
-    return `/api/preview-proxy?target=${encodeURIComponent(previewUrl)}`;
-  }, [previewUrl]);
 
   const handleStart = async () => {
     setError(null);
@@ -202,7 +196,7 @@ const LivePreview = () => {
                 <iframe
                   key={iframeKey}
                   ref={iframeRef}
-                  src={iframeSrc}
+                  src={previewUrl ?? undefined}
                   className="w-full h-full border-none"
                   title="Live Preview"
                   onLoad={handleIframeLoad}

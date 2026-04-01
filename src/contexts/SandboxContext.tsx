@@ -431,13 +431,9 @@ export const SandboxProvider = ({ children }: { children: React.ReactNode }) => 
         throw new Error(`Dev server failed to start.\nInstall log: ${result.installLog}\nVite log: ${result.viteLog}`);
       }
 
-      let finalUrl = result.previewUrl;
-      if (result.previewToken) {
-        // If there's a token, we might need to append it if it's not already there
-        if (!finalUrl.includes("token=")) {
-          finalUrl += (finalUrl.includes("?") ? "&" : "?") + `token=${result.previewToken}`;
-        }
-      }
+      // Signed URL already has the token embedded in the hostname (e.g. 3000-TOKEN.daytonaproxy01.net).
+      // Do NOT append ?token= as a query param — that triggers the Daytona preview warning page.
+      const finalUrl = result.previewUrl;
 
       setPreviewUrl(finalUrl);
       setPreviewStatus("running");
