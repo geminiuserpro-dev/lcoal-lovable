@@ -23,6 +23,7 @@ import { ChatMsg } from "@/lib/ai-chat";
 import { SandboxFile, TreeNode } from "../types";
 import { useStore } from "../store/store";
 import { useFirebase } from "../components/FirebaseProvider";
+import { GeminiService } from "../services/GeminiService";
 
 interface SandboxContextType {
   sandboxId: string | null;
@@ -1203,27 +1204,8 @@ export const SandboxProvider = ({ children }: { children: React.ReactNode }) => 
             if (!prompt) return { result: "Error: prompt is required", success: false };
 
             try {
-              const { GoogleGenAI } = await import("@google/genai");
-              const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-
-              // Use Gemini's native image generation (current model per API docs)
-              const response = await ai.models.generateContent({
-                model: "gemini-3.1-flash-image-preview",
-                contents: prompt,
-                config: { responseModalities: ["IMAGE", "TEXT"] } as any,
-              });
-
-              // Extract image bytes from response
-              let b64 = "";
-              let mimeType = "image/jpeg";
-              for (const part of response.candidates?.[0]?.content?.parts || []) {
-                if (part.inlineData?.data) {
-                  b64 = part.inlineData.data;
-                  mimeType = part.inlineData.mimeType || "image/jpeg";
-                  break;
-                }
-              }
-              if (!b64) return { result: "Failed to generate image: no image data in response", success: false };
+              const response = await GeminiService.generateImage(prompt);
+              const { b64, mimeType } = response;
 
               const ext = mimeType.includes("png") ? "png" : "jpg";
               const finalPath = targetPath.replace(/\.(jpg|jpeg|png|webp)$/i, `.${ext}`) || targetPath;
@@ -1257,31 +1239,9 @@ export const SandboxProvider = ({ children }: { children: React.ReactNode }) => 
 
               const refinedPrompt = prompt;
 
-              // Step 2: Read source images
-              const parts: any[] = [];
-              for (const imgPath of imagePaths) {
-                const res = await executeCommand(sid, `base64 -w 0 ${wd}/${imgPath}`);
-                if (res.exitCode !== 0) return { result: `Failed to read image ${imgPath}: ${res.result}`, success: false };
-                const ext = imgPath.split(".").pop()?.toLowerCase() || "png";
-                const mimeType = ext === "jpg" || ext === "jpeg" ? "image/jpeg" : `image/${ext}`;
-                parts.push({ inlineData: { data: res.result.trim(), mimeType } });
-              }
-              parts.push({ text: refinedPrompt });
-
               // Step 3: Edit with Gemini vision model
-              const { GoogleGenAI } = await import("@google/genai");
-              const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-              const response = await ai.models.generateContent({
-                model: "gemini-3.1-flash-image-preview",
-                contents: { parts },
-                config: { responseModalities: ["IMAGE", "TEXT"] } as any,
-              });
-
-              let b64 = "";
-              for (const part of response.candidates?.[0]?.content?.parts || []) {
-                if ((part as any).inlineData) { b64 = (part as any).inlineData.data; break; }
-              }
-              if (!b64) return { result: "Failed to edit image: no image data returned", success: false };
+              const response = await GeminiService.editImage(refinedPrompt, imagesForEdit);
+              const { b64 } = response;
 
               const destDir = targetPath.split("/").slice(0, -1).join("/");
               if (destDir) await executeCommand(sid, `mkdir -p ${wd}/${destDir}`);
