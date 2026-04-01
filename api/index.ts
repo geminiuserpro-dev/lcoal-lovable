@@ -67,6 +67,59 @@ app.get("/api/health", (req, res) => {
   res.json({ status: "ok", env: process.env.NODE_ENV, sdk: "active", vercel: !!process.env.VERCEL });
 });
 
+// ── Daytona Preview Proxy ─────────────────────────────────────────────────────
+// Proxies the preview through our HTTPS server with X-Daytona-Skip-Preview-Warning
+// so the iframe never sees Daytona's auth warning page (which has an HTTP form action)
+app.use("/api/preview-proxy", async (req: any, res: any) => {
+  const target = req.query.target as string;
+  if (!target) return res.status(400).send("Missing target");
+  try {
+    const url = new URL(target);
+    // Only proxy daytona proxy domains for safety
+    if (!url.hostname.endsWith(".daytonaproxy01.net") && !url.hostname.endsWith(".proxy.daytona.works")) {
+      return res.status(403).send("Forbidden: only Daytona proxy URLs allowed");
+    }
+    // Forward the actual path + query from the incoming request (minus our ?target=)
+    const targetPath = req.path === "/" ? "" : req.path;
+    const targetQuery = new URLSearchParams(
+      Object.fromEntries(Object.entries(req.query as Record<string, string>).filter(([k]) => k !== "target"))
+    ).toString();
+    const proxyUrl = `${target}${targetPath}${targetQuery ? "?" + targetQuery : ""}`;
+
+    const upstream = await fetch(proxyUrl, {
+      method: req.method,
+      headers: {
+        "X-Daytona-Skip-Preview-Warning": "true",
+        "X-Daytona-Preview-Token": url.hostname.split("-")[1]?.split(".")[0] || "",
+        "User-Agent": "Mozilla/5.0 (compatible; VercelProxy)",
+      },
+      // Forward body for POST etc.
+      body: ["GET", "HEAD"].includes(req.method) ? undefined : req.body,
+    });
+
+    // Forward status and headers (skip problematic ones)
+    res.status(upstream.status);
+    const skip = new Set(["transfer-encoding", "connection", "keep-alive"]);
+    upstream.headers.forEach((v, k) => {
+      if (!skip.has(k.toLowerCase())) res.setHeader(k, v);
+    });
+    // Ensure served over HTTPS: rewrite http:// refs in HTML to https://
+    const ct = upstream.headers.get("content-type") || "";
+    if (ct.includes("text/html")) {
+      let html = await upstream.text();
+      html = html.replace(/http:\/\//g, "https://");
+      res.send(html);
+    } else {
+      const buf = Buffer.from(await upstream.arrayBuffer());
+      res.send(buf);
+    }
+  } catch (e: any) {
+    res.status(502).send(`Proxy error: ${e.message}`);
+  }
+});
+
+
+
 app.get("/api/sandbox-logs", (req, res) => {
   res.json(lastSandboxLogs);
 });

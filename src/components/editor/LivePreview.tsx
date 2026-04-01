@@ -28,6 +28,13 @@ const LivePreview = () => {
   const consoleRef = useRef<HTMLDivElement>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
 
+  // Route through our proxy to add X-Daytona-Skip-Preview-Warning header server-side,
+  // which prevents the Daytona warning page (with its HTTP form action Mixed Content error)
+  const iframeSrc = useMemo(() => {
+    if (!previewUrl) return undefined;
+    return `/api/preview-proxy?target=${encodeURIComponent(previewUrl)}`;
+  }, [previewUrl]);
+
   const handleStart = async () => {
     setError(null);
     try { await startPreview(); }
@@ -195,7 +202,7 @@ const LivePreview = () => {
                 <iframe
                   key={iframeKey}
                   ref={iframeRef}
-                  src={previewUrl ?? undefined}
+                  src={iframeSrc}
                   className="w-full h-full border-none"
                   title="Live Preview"
                   onLoad={handleIframeLoad}
@@ -203,7 +210,7 @@ const LivePreview = () => {
                   sandbox="allow-forms allow-modals allow-popups allow-presentation allow-same-origin allow-scripts"
                   allow="accelerometer; camera; encrypted-media; geolocation; gyroscope; microphone; midi; clipboard-read; clipboard-write"
                 />
-                {/* Proxy auth fallback — shown when iframe 400s due to Daytona OAuth cookie restrictions */}
+                {/* Fallback for when iframed preview fails to load */}
                 {iframeError && previewUrl && (
                   <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-4 bg-background/95 backdrop-blur-sm text-center p-6">
                     <div className="w-12 h-12 rounded-2xl bg-primary/10 border border-primary/20 flex items-center justify-center">
@@ -212,7 +219,7 @@ const LivePreview = () => {
                     <div>
                       <p className="text-sm font-semibold">Preview ready!</p>
                       <p className="text-xs text-muted-foreground/70 mt-1 max-w-[260px] leading-relaxed">
-                        The Daytona preview requires browser auth. Open it in a new tab to complete sign-in.
+                        Open in a new tab to view your running app.
                       </p>
                     </div>
                     <button
