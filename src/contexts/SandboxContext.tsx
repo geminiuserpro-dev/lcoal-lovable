@@ -1239,6 +1239,16 @@ export const SandboxProvider = ({ children }: { children: React.ReactNode }) => 
 
               const refinedPrompt = prompt;
 
+              // Step 2: Read source images
+              const imagesForEdit: { data: string; mimeType: string }[] = [];
+              for (const imgPath of imagePaths) {
+                const res = await executeCommand(sid, `base64 -w 0 ${wd}/${imgPath}`);
+                if (res.exitCode !== 0) return { result: `Failed to read image ${imgPath}: ${res.result}`, success: false };
+                const ext = imgPath.split(".").pop()?.toLowerCase() || "png";
+                const mimeType = ext === "jpg" || ext === "jpeg" ? "image/jpeg" : `image/${ext}`;
+                imagesForEdit.push({ data: res.result.trim(), mimeType });
+              }
+
               // Step 3: Edit with Gemini vision model
               const response = await GeminiService.editImage(refinedPrompt, imagesForEdit);
               const { b64 } = response;

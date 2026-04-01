@@ -3,6 +3,7 @@ import path from "path";
 import compression from "compression";
 import Stripe from "stripe";
 import { Daytona } from "@daytonaio/sdk";
+import { GoogleGenAI } from "@google/genai";
 
 // ── Rate Limiter ─────────────────────────────────────────────────────────────
 const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
@@ -455,6 +456,61 @@ app.post("/api/create-checkout-session", async (req, res) => {
     });
     res.json({ id: session.id, url: session.url });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Gemini AI (Server-Side) ──────────────────────────────────────────────────
+app.post("/api/gemini", async (req, res) => {
+  try {
+    const { action, prompt, images } = req.body;
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) return res.status(500).json({ error: "GEMINI_API_KEY is not set." });
+
+    const genAI = new GoogleGenAI({ apiKey });
+    const modelId = "gemini-3.1-flash-image-preview";
+
+    if (action === "generateImage") {
+      const result = await (genAI as any).models.generateContent({
+        model: modelId,
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        config: { responseModalities: ["IMAGE", "TEXT"] } as any,
+      });
+
+      const response = result.response;
+      let b64 = "";
+      let mimeType = "image/jpeg";
+      for (const part of response.candidates?.[0]?.content?.parts || []) {
+        if (part.inlineData?.data) {
+          b64 = part.inlineData.data;
+          mimeType = part.inlineData.mimeType || "image/jpeg";
+          break;
+        }
+      }
+      return res.json({ b64, mimeType });
+
+    } else if (action === "editImage") {
+      const parts: any[] = (images || []).map((img: any) => ({
+        inlineData: { data: img.data, mimeType: img.mimeType }
+      }));
+      parts.push({ text: prompt });
+
+      const result = await (genAI as any).models.generateContent({
+        model: modelId,
+        contents: [{ role: "user", parts }],
+        config: { responseModalities: ["IMAGE", "TEXT"] } as any,
+      });
+
+      const response = result.response;
+      let b64 = "";
+      for (const part of response.candidates?.[0]?.content?.parts || []) {
+        if ((part as any).inlineData) { b64 = (part as any).inlineData.data; break; }
+      }
+      return res.json({ b64 });
+    }
+
+    res.status(400).json({ error: "Invalid action." });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.post("/api/firecrawl/:action", async (req, res) => {
