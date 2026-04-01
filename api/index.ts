@@ -67,6 +67,58 @@ app.get("/api/health", (req, res) => {
   res.json({ status: "ok", env: process.env.NODE_ENV, sdk: "active", vercel: !!process.env.VERCEL });
 });
 
+// ── Preview Proxy ────────────────────────────────────────────────────────────
+// Forwards requests to Daytona sandbox with X-Daytona-Skip-Preview-Warning
+// so the iframe never sees the warning page (which has HTTP form actions → Mixed Content).
+// Usage: /api/preview-proxy?url=https%3A%2F%2F3000-TOKEN.daytonaproxy01.net%2Fpath
+app.use("/api/preview-proxy", async (req, res) => {
+  const rawUrl = req.query.url as string;
+  if (!rawUrl) return res.status(400).json({ error: "url query param required" });
+
+  try {
+    const targetUrl = new URL(rawUrl);
+    // Forward all query params except our own 'url' param
+    const forwardUrl = new URL(targetUrl.toString());
+
+    const headers: Record<string, string> = {
+      "X-Daytona-Skip-Preview-Warning": "true",
+      "Accept": req.headers.accept as string || "*/*",
+      "Accept-Language": req.headers["accept-language"] as string || "en",
+    };
+    if (req.headers["accept-encoding"]) {
+      headers["Accept-Encoding"] = "identity"; // disable compression so we can pipe cleanly
+    }
+
+    const upstream = await fetch(forwardUrl.toString(), { headers, redirect: "follow" });
+
+    // Copy status and safe headers
+    res.status(upstream.status);
+    const ct = upstream.headers.get("content-type");
+    if (ct) res.setHeader("Content-Type", ct);
+    res.setHeader("Access-Control-Allow-Origin", "*");
+
+    // Rewrite absolute URLs in HTML so relative links stay in the proxy
+    if (ct?.includes("text/html")) {
+      const html = await upstream.text();
+      // Replace http:// Daytona URLs with our proxy path
+      const rewritten = html.replace(
+        /(href|src|action)="(http|https):\/\/([\w-]+\.daytonaproxy[\w.]*)(\/[^"]*)"/gi,
+        (_m: string, attr: string, _scheme: string, host: string, path: string) =>
+          `${attr}="/api/preview-proxy?url=${encodeURIComponent(`https://${host}${path}`)}"`
+      );
+      return res.send(rewritten);
+    }
+
+    // Stream binary responses directly
+    const buf = await upstream.arrayBuffer();
+    return res.send(Buffer.from(buf));
+  } catch (e: any) {
+    console.error("Preview proxy error:", e.message);
+    return res.status(502).json({ error: e.message });
+  }
+});
+
+
 app.get("/api/sandbox-logs", (req, res) => {
   res.json(lastSandboxLogs);
 });

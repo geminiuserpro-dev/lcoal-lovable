@@ -432,17 +432,21 @@ export const SandboxProvider = ({ children }: { children: React.ReactNode }) => 
       }
 
       let finalUrl = result.previewUrl;
-      if (result.previewToken) {
-        // If there's a token, we might need to append it if it's not already there
-        if (!finalUrl.includes("token=")) {
-          finalUrl += (finalUrl.includes("?") ? "&" : "?") + `token=${result.previewToken}`;
-        }
+      if (result.previewToken && !finalUrl.includes("token=")) {
+        finalUrl += (finalUrl.includes("?") ? "&" : "?") + `token=${result.previewToken}`;
       }
 
-      setPreviewUrl(finalUrl);
+      // Store raw URL for tool use (webscrape, fetch, etc.)
+      (window as any).__previewUrl = finalUrl;
+
+      // Route iframe through our server-side proxy to bypass Daytona warning page
+      // (warning page has HTTP form action → Mixed Content block in browsers)
+      const proxyUrl = `/api/preview-proxy?url=${encodeURIComponent(finalUrl)}`;
+      setPreviewUrl(proxyUrl);
       setPreviewStatus("running");
 
       return finalUrl;
+
     } catch (e) {
       console.error("Preview start failed:", e);
       setPreviewStatus("error");
