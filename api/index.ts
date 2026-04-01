@@ -68,46 +68,54 @@ app.get("/api/health", (req, res) => {
 });
 
 // ── Daytona Preview Proxy ─────────────────────────────────────────────────────
-// Proxies the preview through our HTTPS server with X-Daytona-Skip-Preview-Warning
-// so the iframe never sees Daytona's auth warning page (which has an HTTP form action)
-app.use("/api/preview-proxy", async (req: any, res: any) => {
+// Only proxies the initial HTML load, adding X-Daytona-Skip-Preview-Warning so
+// the iframe never sees Daytona's warning page (which has an HTTP form action).
+// A <base href> is injected so all sub-resources (JS, CSS, WS) resolve from the
+// real Daytona origin directly — avoiding the proxy MIME-type mismatch.
+app.get("/api/preview-proxy", async (req: any, res: any) => {
   const target = req.query.target as string;
   if (!target) return res.status(400).send("Missing target");
   try {
     const url = new URL(target);
-    // Only proxy daytona proxy domains for safety
+    // Safety: only proxy daytona domains
     if (!url.hostname.endsWith(".daytonaproxy01.net") && !url.hostname.endsWith(".proxy.daytona.works")) {
       return res.status(403).send("Forbidden: only Daytona proxy URLs allowed");
     }
-    // Forward the actual path + query from the incoming request (minus our ?target=)
-    const targetPath = req.path === "/" ? "" : req.path;
-    const targetQuery = new URLSearchParams(
-      Object.fromEntries(Object.entries(req.query as Record<string, string>).filter(([k]) => k !== "target"))
-    ).toString();
-    const proxyUrl = `${target}${targetPath}${targetQuery ? "?" + targetQuery : ""}`;
 
-    const upstream = await fetch(proxyUrl, {
-      method: req.method,
+    // Build canonical origin for base href (https, no query string)
+    const origin = `${url.protocol}//${url.hostname}`;
+    const httpsOrigin = origin.replace("http://", "https://");
+
+    // Extract token from query string if present (for X-Daytona-Preview-Token header)
+    const token = url.searchParams.get("token") || url.hostname.split("-").slice(1).join("-").split(".")[0] || "";
+
+    const upstream = await fetch(target, {
       headers: {
         "X-Daytona-Skip-Preview-Warning": "true",
-        "X-Daytona-Preview-Token": url.hostname.split("-")[1]?.split(".")[0] || "",
-        "User-Agent": "Mozilla/5.0 (compatible; VercelProxy)",
+        ...(token ? { "X-Daytona-Preview-Token": token } : {}),
+        "User-Agent": "Mozilla/5.0 (compatible; VercelProxy/1.0)",
       },
-      // Forward body for POST etc.
-      body: ["GET", "HEAD"].includes(req.method) ? undefined : req.body,
     });
 
-    // Forward status and headers (skip problematic ones)
-    res.status(upstream.status);
-    const skip = new Set(["transfer-encoding", "connection", "keep-alive"]);
-    upstream.headers.forEach((v, k) => {
-      if (!skip.has(k.toLowerCase())) res.setHeader(k, v);
-    });
-    // Ensure served over HTTPS: rewrite http:// refs in HTML to https://
+    // Rewrite & inject base href into the HTML so sub-resources load from Daytona origin
     const ct = upstream.headers.get("content-type") || "";
+    res.status(upstream.status);
+    // Skip hop-by-hop headers, allow CORS from our origin
+    const skipHeaders = new Set(["transfer-encoding", "connection", "keep-alive", "content-security-policy"]);
+    upstream.headers.forEach((v, k) => {
+      if (!skipHeaders.has(k.toLowerCase())) res.setHeader(k, v);
+    });
+    res.setHeader("Content-Security-Policy", "");
+
     if (ct.includes("text/html")) {
       let html = await upstream.text();
+      // Rewrite any http:// → https:// to prevent mixed content from Daytona's HTML
       html = html.replace(/http:\/\//g, "https://");
+      // Inject <base href> so relative paths (JS modules, CSS, WS) resolve from Daytona origin
+      const baseTag = `<base href="${httpsOrigin}/">`;
+      html = html.replace(/(<head[^>]*>)/i, `$1${baseTag}`);
+      if (!html.includes(baseTag)) html = baseTag + html; // fallback if no <head>
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
       res.send(html);
     } else {
       const buf = Buffer.from(await upstream.arrayBuffer());
@@ -117,6 +125,9 @@ app.use("/api/preview-proxy", async (req: any, res: any) => {
     res.status(502).send(`Proxy error: ${e.message}`);
   }
 });
+
+
+
 
 
 
