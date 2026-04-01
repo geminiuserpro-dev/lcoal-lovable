@@ -279,10 +279,10 @@ const ChatPanel = () => {
             {msgCount > 0 && (
               <span className="text-[11px] text-muted-foreground/40 font-medium tabular-nums">#{msgCount}</span>
             )}
-          <button onClick={handleClearChat} title="Clear chat"
-            className="p-1 rounded-lg hover:bg-destructive/10 text-muted-foreground/30 hover:text-destructive transition-colors">
-            <Trash2 size={12} />
-          </button>
+            <button onClick={handleClearChat} title="Clear chat"
+              className="p-1 rounded-lg hover:bg-destructive/10 text-muted-foreground/30 hover:text-destructive transition-colors">
+              <Trash2 size={12} />
+            </button>
           </div>
         </div>
       </div>
@@ -368,8 +368,8 @@ const ChatPanel = () => {
           <div className="flex items-center justify-between px-3 pb-2.5 gap-2">
             <div className="flex items-center gap-0.5">
               <input type="file" accept="image/*" multiple hidden ref={fileInputRef} onChange={handleImageUpload} />
-              <button 
-                onClick={() => fileInputRef.current?.click()} 
+              <button
+                onClick={() => fileInputRef.current?.click()}
                 className="p-1.5 rounded-lg hover:bg-muted/60 transition-colors text-muted-foreground/50 hover:text-foreground"
                 title="Upload image (max 3)"
               >
@@ -383,7 +383,7 @@ const ChatPanel = () => {
             <div className="flex items-center gap-1.5">
               {charCount > 0 && !isProcessing && (
                 <span className={`text-[10px] tabular-nums font-medium transition-colors ${charCount > 1500 ? "text-destructive" : "text-muted-foreground/30"}`}>
-                  {charCount > 1000 ? `${(charCount/1000).toFixed(1)}k` : charCount}
+                  {charCount > 1000 ? `${(charCount / 1000).toFixed(1)}k` : charCount}
                 </span>
               )}
               {isProcessing && (

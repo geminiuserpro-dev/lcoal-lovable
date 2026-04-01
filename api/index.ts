@@ -4,6 +4,9 @@ import compression from "compression";
 import Stripe from "stripe";
 import { Daytona } from "@daytonaio/sdk";
 import { GoogleGenAI } from "@google/genai";
+import { google, createGoogleGenerativeAI } from "@ai-sdk/google";
+import { streamText, generateText, tool, stepCountIs, zodSchema } from "ai";
+import { z } from "zod";
 
 // ── Rate Limiter ─────────────────────────────────────────────────────────────
 const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
@@ -69,25 +72,17 @@ app.get("/api/health", (req, res) => {
 });
 
 // ── Daytona Preview Proxy ─────────────────────────────────────────────────────
-// Only proxies the initial HTML load, adding X-Daytona-Skip-Preview-Warning so
-// the iframe never sees Daytona's warning page (which has an HTTP form action).
-// A <base href> is injected so all sub-resources (JS, CSS, WS) resolve from the
-// real Daytona origin directly — avoiding the proxy MIME-type mismatch.
 app.get("/api/preview-proxy", async (req: any, res: any) => {
   const target = req.query.target as string;
   if (!target) return res.status(400).send("Missing target");
   try {
     const url = new URL(target);
-    // Safety: only proxy daytona domains
     if (!url.hostname.endsWith(".daytonaproxy01.net") && !url.hostname.endsWith(".proxy.daytona.works")) {
       return res.status(403).send("Forbidden: only Daytona proxy URLs allowed");
     }
 
-    // Build canonical origin for base href (https, no query string)
     const origin = `${url.protocol}//${url.hostname}`;
     const httpsOrigin = origin.replace("http://", "https://");
-
-    // Extract token from query string if present (for X-Daytona-Preview-Token header)
     const token = url.searchParams.get("token") || url.hostname.split("-").slice(1).join("-").split(".")[0] || "";
 
     const upstream = await fetch(target, {
@@ -98,10 +93,8 @@ app.get("/api/preview-proxy", async (req: any, res: any) => {
       },
     });
 
-    // Rewrite & inject base href into the HTML so sub-resources load from Daytona origin
     const ct = upstream.headers.get("content-type") || "";
     res.status(upstream.status);
-    // Skip hop-by-hop headers, allow CORS from our origin
     const skipHeaders = new Set(["transfer-encoding", "connection", "keep-alive", "content-security-policy"]);
     upstream.headers.forEach((v, k) => {
       if (!skipHeaders.has(k.toLowerCase())) res.setHeader(k, v);
@@ -110,12 +103,10 @@ app.get("/api/preview-proxy", async (req: any, res: any) => {
 
     if (ct.includes("text/html")) {
       let html = await upstream.text();
-      // Rewrite any http:// → https:// to prevent mixed content from Daytona's HTML
       html = html.replace(/http:\/\//g, "https://");
-      // Inject <base href> so relative paths (JS modules, CSS, WS) resolve from Daytona origin
       const baseTag = `<base href="${httpsOrigin}/">`;
       html = html.replace(/(<head[^>]*>)/i, `$1${baseTag}`);
-      if (!html.includes(baseTag)) html = baseTag + html; // fallback if no <head>
+      if (!html.includes(baseTag)) html = baseTag + html;
       res.setHeader("Content-Type", "text/html; charset=utf-8");
       res.send(html);
     } else {
@@ -126,11 +117,6 @@ app.get("/api/preview-proxy", async (req: any, res: any) => {
     res.status(502).send(`Proxy error: ${e.message}`);
   }
 });
-
-
-
-
-
 
 app.get("/api/sandbox-logs", (req, res) => {
   res.json(lastSandboxLogs);
@@ -176,15 +162,12 @@ app.post("/api/daytona", async (req, res) => {
         snapshot: snapshot,
         labels: { platform }
       });
-      
-      // Add minimal delay for toolbox to breathe
       console.log(`Sandbox ${sandbox.id} created. Waiting for network...`);
       await new Promise(r => setTimeout(r, 5000));
-      
       res.json({ sandboxId: sandbox.id });
     } else if (action === "health") {
-      const sandbox = await daytona.get(sandboxId);
-      res.json({ status: "ready" }); // Simplified for SDK
+      await daytona.get(sandboxId);
+      res.json({ status: "ready" });
     } else {
       const sandbox = await daytona.get(sandboxId);
       const wd = "/home/daytona/repo";
@@ -202,12 +185,12 @@ app.post("/api/daytona", async (req, res) => {
         const data = await sandbox.process.executeCommand(params.command);
         res.json({ result: data.result, exitCode: data.exitCode });
       } else if (action === "writeFile") {
-        fileListCache.delete(`${sandboxId}:/home/daytona/repo`); // invalidate on write
+        fileListCache.delete(`${sandboxId}:/home/daytona/repo`);
         const content = params.content || "";
         const fp = normalizePath(params.filePath);
         const dir = fp.split("/").slice(0, -1).join("/");
         if (dir) {
-          try { await sandbox.fs.createFolder(dir, "755"); } catch (e) {} // ignore if exists
+          try { await sandbox.fs.createFolder(dir, "755"); } catch (e) {}
         }
         await sandbox.fs.uploadFile(Buffer.from(content, "utf8"), fp);
         res.json({ success: true });
@@ -218,7 +201,6 @@ app.post("/api/daytona", async (req, res) => {
           const content = buffer.toString("utf8");
           res.json({ content, exitCode: 0 });
         } catch (e: any) {
-          // Fallback to binary detection if it fails or if it's actually binary
           res.json({ content: `[Error reading file: ${e.message}]`, exitCode: 1 });
         }
       } else if (action === "listFiles") {
@@ -236,8 +218,6 @@ app.post("/api/daytona", async (req, res) => {
       } else if (action === "startDevServer") {
         const port = params.port || 3000;
         const wd = "/home/daytona/repo";
-
-        // Wait for Toolbox to be network-ready before running any command
         let ready = false;
         let delay = 2000;
         for (let i = 0; i < 10; i++) {
@@ -246,56 +226,25 @@ app.post("/api/daytona", async (req, res) => {
             ready = true;
             break;
           } catch (e: any) {
-            const isConnErr = e.name === "AggregateError" || (e.message || "").includes("Timeout");
-            console.warn(`[startDevServer] Toolbox check ${i+1}: ${isConnErr ? "Waiting..." : e.message}`);
             await new Promise(r => setTimeout(r, delay));
             delay = Math.min(delay * 1.5, 10000);
           }
         }
-        if (!ready) throw new Error("Sandbox Toolbox did not respond in time. Cannot start dev server.");
-
-        // Start dev server from a stable dir to avoid getcwd issues
+        if (!ready) throw new Error("Sandbox Toolbox did not respond in time.");
         const data = await sandbox.process.executeCommand(`mkdir -p ${wd} && cd ${wd} && (npm run dev -- --port ${port} --host 0.0.0.0 > /tmp/vite.log 2>&1 &)`);
-
-        // Fetch SIGNED preview URL (token embedded in URL — no OAuth redirect needed)
-        // Standard token causes browser OAuth → 400 "authentication state verification failed"
-        let previewUrl = `https://${port}-${sandboxId}.proxy.daytona.works`; // fallback
+        let previewUrl = `https://${port}-${sandboxId}.proxy.daytona.works`;
         let previewToken = "";
         try {
           const apiBase = process.env.DAYTONA_API_URL || process.env.DAYTONA_SERVER_URL || "https://app.daytona.io/api";
           const signedUrl = `${apiBase}/sandbox/${sandboxId}/ports/${port}/signed-preview-url?expiresInSeconds=3600`;
-          const tr = await fetch(signedUrl, {
-            headers: { "Authorization": `Bearer ${process.env.DAYTONA_API_KEY}` }
-          });
+          const tr = await fetch(signedUrl, { headers: { "Authorization": `Bearer ${process.env.DAYTONA_API_KEY}` } });
           if (tr.ok) {
             const json = await tr.json();
-            // Signed URL format: https://{port}-{token}.proxy.daytona.works
-            // This bypasses OAuth and works directly in iframes
-            if (json.url) {
-              previewUrl = json.url;
-              previewToken = json.token || "";
-            }
-          } else {
-            console.error(`Signed preview URL fetch failed: ${tr.status} ${tr.statusText}`);
+            if (json.url) { previewUrl = json.url; previewToken = json.token || ""; }
           }
-        } catch (e) {
-          console.error("Failed to fetch signed preview URL:", e);
-        }
-
-        lastSandboxLogs = { 
-          install: "Quick Start: Skipping npm install", 
-          vite: data.result || "Vite started in background", 
-          sandboxId: sandboxId 
-        };
-
-        res.json({ 
-          previewUrl,
-          previewToken,
-          serverReady: true,
-          installLog: lastSandboxLogs.install,
-          viteLog: lastSandboxLogs.vite
-        });
-
+        } catch (e) {}
+        lastSandboxLogs = { install: "Skiping npm install", vite: data.result || "Vite started", sandboxId };
+        res.json({ previewUrl, previewToken, serverReady: true, installLog: lastSandboxLogs.install, viteLog: lastSandboxLogs.vite });
       } else if (action === "getLogs") {
         const data = await sandbox.process.executeCommand(`tail -n 100 /tmp/vite.log || echo "No logs"`);
         res.json({ result: data.result, exitCode: data.exitCode });
@@ -305,37 +254,10 @@ app.post("/api/daytona", async (req, res) => {
       } else if (action === "cloneRepo") {
         const repoUrl = (params.repoUrl as string || "").trim();
         if (!repoUrl) throw new Error("repoUrl is required");
-        
-        // Robust polling for network-readiness (Daytona Toolbox)
-        let ready = false;
-        let delay = 2000;
-        for (let i = 0; i < 10; i++) {
-          try {
-            await sandbox.process.executeCommand("echo ping");
-            ready = true;
-            break;
-          } catch (e: any) {
-            const isConnErr = e.name === "AggregateError" || e.message.includes("Timeout");
-            console.warn(`Sandbox connectivity check ${i+1}: ${isConnErr ? "Waiting for Toolbox..." : e.message}`);
-            await new Promise(r => setTimeout(r, delay));
-            delay = Math.min(delay * 1.5, 10000); // Exponential backoff max 10s
-          }
-        }
-        if (!ready) throw new Error("Sandbox Toolbox failed to respond. Network stability issues detected.");
-
         const tmpDir = `/home/daytona/repo_tmp_${Date.now()}`;
         const cloneCmd = `cd /home/daytona && git clone --depth 1 ${repoUrl} ${tmpDir} && rm -rf /home/daytona/repo && mv ${tmpDir} /home/daytona/repo`;
         const data = await sandbox.process.executeCommand(cloneCmd);
         res.json({ result: data.result || "Cloned successfully", exitCode: data.exitCode });
-      } else if (action === "stop") {
-        await sandbox.stop();
-        res.json({ success: true });
-      } else if (action === "start") {
-        await sandbox.start();
-        res.json({ success: true });
-      } else if (action === "delete") {
-        await daytona.delete(sandbox);
-        res.json({ success: true });
       } else if (action === "deleteAll") {
         const list = await daytona.list();
         const items = (list as any).items || [];
@@ -357,114 +279,98 @@ app.post("/api/daytona", async (req, res) => {
       }
     }
   } catch (e: any) {
-    console.error("Daytona API Error:", e);
     res.status(500).json({ error: e.message });
   }
 });
 
-// ── AI Proxy Handlers ────────────────────────────────────────────────────────
-app.post("/api/ai/gemini", async (req, res) => {
+// ── Vercel AI SDK (Generative AI) ────────────────────────────────────────────
+app.post("/api/ai/chat", async (req, res) => {
   try {
-    const key = process.env.GEMINI_API_KEY;
-    const { model, contents, generationConfig, system_instruction } = req.body;
-    const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model || "gemini-1.5-flash"}:generateContent?key=${key}`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ contents, generationConfig, system_instruction })
-    });
-    res.status(resp.status).json(await resp.json());
-  } catch (e: any) { res.status(500).json({ error: e.message }); }
-});
+    const { messages, model: modelId = "gemini-1.5-flash", system, sandboxId } = req.body;
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) return res.status(500).json({ error: "GEMINI_API_KEY is not set." });
 
-app.post("/api/ai/anthropic", async (req, res) => {
-  try {
-    const key = process.env.ANTHROPIC_API_KEY;
-    const resp = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST", headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json" },
-      body: JSON.stringify(req.body)
-    });
-    if (req.body.stream) {
-      res.setHeader("Content-Type", "text/event-stream");
-      const reader = resp.body?.getReader();
-      while (reader) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        res.write(value);
+    const googleAI = createGoogleGenerativeAI({ apiKey });
+    const wd = "/home/daytona/repo";
+    const normalizePath = (p: string) => {
+      let normalized = p;
+      if (p.startsWith("/project/")) {
+        normalized = p.replace("/project/", `${wd}/`);
+      } else if (!p.startsWith("/")) {
+        normalized = `${wd}/${p}`;
       }
-      res.end();
-    } else { res.status(resp.status).json(await resp.json()); }
-  } catch (e: any) { res.status(500).json({ error: e.message }); }
-});
+      return normalized;
+    };
 
-// ── GitHub & Vercel ──────────────────────────────────────────────────────────
-app.post("/api/github/oauth", async (req, res) => {
-  try {
-    const resp = await fetch("https://github.com/login/oauth/access_token", {
-      method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" },
-      body: JSON.stringify({ client_id: process.env.GITHUB_CLIENT_ID, client_secret: process.env.GITHUB_CLIENT_SECRET, code: req.body.code }),
-    });
-    res.json(await resp.json());
-  } catch (e: any) { res.status(500).json({ error: e.message }); }
-});
+    const sandbox = sandboxId ? await getDaytona().get(sandboxId) : null;
+    const model = googleAI(modelId.startsWith("gemini-3") ? modelId : "gemini-1.5-flash");
 
-app.post("/api/deploy", async (req, res) => {
-  try {
-    const { files, projectName } = req.body;
-    const fileList = Object.entries(files as Record<string, string>).map(([file, content]) => ({
-      file, data: Buffer.from(content).toString("base64"), encoding: "base64"
-    }));
-    const resp = await fetch("https://api.vercel.com/v13/deployments", {
-      method: "POST", headers: { Authorization: `Bearer ${process.env.VERCEL_TOKEN}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        name: (projectName || "app").toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 52),
-        files: fileList,
-        projectSettings: { framework: "vite", buildCommand: "npm run build", outputDirectory: "dist" },
-        public: true,
-      }),
-    });
-    const data = await resp.json();
-    res.json({ url: `https://${data.url}`, deployId: data.id, provider: "vercel" });
-  } catch (e: any) { res.status(500).json({ error: e.message }); }
-});
-
-// ── Stripe ───────────────────────────────────────────────────────────────────
-app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), async (req, res) => {
-  try {
-    const stripe = getStripe();
-    const sig = req.headers["stripe-signature"] as string;
-    const event = process.env.STRIPE_WEBHOOK_SECRET && sig 
-      ? stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET)
-      : JSON.parse(req.body.toString());
-
-    if (event.type === "checkout.session.completed") {
-      const session = event.data.object;
-      const uid = session.metadata?.uid || session.client_reference_id;
-      if (uid) {
-        const { initializeApp, getApps } = await import("firebase-admin/app");
-        const { getFirestore } = await import("firebase-admin/firestore");
-        const projectId = process.env.VITE_FIREBASE_PROJECT_ID;
-        const databaseId = process.env.VITE_FIREBASE_FIRESTORE_DATABASE_ID;
-        if (!getApps().length) initializeApp({ projectId });
-        const db = databaseId ? getFirestore(databaseId) : getFirestore();
-        await db.collection("users").doc(uid).set({ plan: session.metadata?.priceId?.includes("team") ? "team" : "pro", creditsUsed: 0 }, { merge: true });
+    const result = streamText({
+      model,
+      messages,
+      system,
+      stopWhen: stepCountIs(10),
+      tools: {
+        writeFile: tool({
+          description: "Write content to a file in the sandbox.",
+          parameters: z.object({
+            filePath: z.string().describe("The path to the file"),
+            content: z.string().describe("The content to write")
+          }),
+          execute: async ({ filePath, content }) => {
+            if (!sandbox) return "Error: No sandbox active.";
+            const fp = normalizePath(filePath);
+            const dir = fp.split("/").slice(0, -1).join("/");
+            if (dir) { try { await sandbox.fs.createFolder(dir, "755"); } catch (e) {} }
+            await sandbox.fs.uploadFile(Buffer.from(content, "utf8"), fp);
+            return `Successfully wrote to ${filePath}`;
+          }
+        }),
+        readFile: tool({
+          description: "Read the content of a file from the sandbox.",
+          parameters: z.object({ filePath: z.string().describe("The path to the file") }),
+          execute: async ({ filePath }) => {
+            if (!sandbox) return "Error: No sandbox active.";
+            const fp = normalizePath(filePath);
+            const buffer = await sandbox.fs.downloadFile(fp);
+            return buffer.toString("utf8");
+          }
+        }),
+        executeCommand: tool({
+          description: "Run a shell command in the sandbox repository.",
+          parameters: z.object({ command: z.string().describe("The command to execute") }),
+          execute: async ({ command }) => {
+            if (!sandbox) return "Error: No sandbox active.";
+            const data = await sandbox.process.executeCommand(`cd ${wd} && ${command}`);
+            return data.result || "Command executed";
+          }
+        }),
+        listFiles: tool({
+          description: "List files in the sandbox repository.",
+          parameters: z.object({ directory: z.string().optional().describe("The directory to list") }),
+          execute: async ({ directory }) => {
+            if (!sandbox) return "Error: No sandbox active.";
+            const data = await sandbox.process.executeCommand(`find ${directory || wd} -maxdepth 4 -not -path '*/node_modules/*' -not -path '*/.git/*' -type f | head -100`);
+            return data.result || "(empty)";
+          }
+        })
       }
+    });
+
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+
+    for await (const part of result.fullStream) {
+      res.write(`data: ${JSON.stringify(part)}\n\n`);
     }
-    res.json({ received: true });
-  } catch (e: any) { res.status(400).json({ error: e.message }); }
+    res.end();
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
-app.post("/api/create-checkout-session", async (req, res) => {
-  try {
-    const { priceId, successUrl, cancelUrl } = req.body;
-    const session = await getStripe().checkout.sessions.create({
-      payment_method_types: ["card"],
-      line_items: [{ price: priceId, quantity: 1 }],
-      mode: "payment", success_url: successUrl, cancel_url: cancelUrl,
-    });
-    res.json({ id: session.id, url: session.url });
-  } catch (e: any) { res.status(500).json({ error: e.message }); }
-});
-
-// ── Gemini AI (Server-Side) ──────────────────────────────────────────────────
+// ── Gemini AI (Legacy/Specific Image Tools) ──────────────────────────────────
 app.post("/api/gemini", async (req, res) => {
   try {
     const { action, prompt, images } = req.body;
@@ -473,46 +379,35 @@ app.post("/api/gemini", async (req, res) => {
 
     const genAI = new GoogleGenAI({ apiKey });
     const modelId = "gemini-3.1-flash-image-preview";
+    const model = genAI.getGenerativeModel({ model: modelId });
 
     if (action === "generateImage") {
-      const result = await (genAI as any).models.generateContent({
-        model: modelId,
+      const result = await model.generateContent({
         contents: [{ role: "user", parts: [{ text: prompt }] }],
-        config: { responseModalities: ["IMAGE", "TEXT"] } as any,
+        generationConfig: { responseModalities: ["IMAGE", "TEXT"] } as any,
       });
-
-      const response = result.response;
+      const response = await result.response;
       let b64 = "";
       let mimeType = "image/jpeg";
       for (const part of response.candidates?.[0]?.content?.parts || []) {
-        if (part.inlineData?.data) {
-          b64 = part.inlineData.data;
-          mimeType = part.inlineData.mimeType || "image/jpeg";
-          break;
-        }
+        if (part.inlineData?.data) { b64 = part.inlineData.data; mimeType = part.inlineData.mimeType || "image/jpeg"; break; }
       }
       return res.json({ b64, mimeType });
 
     } else if (action === "editImage") {
-      const parts: any[] = (images || []).map((img: any) => ({
-        inlineData: { data: img.data, mimeType: img.mimeType }
-      }));
+      const parts: any[] = (images || []).map((img: any) => ({ inlineData: { data: img.data, mimeType: img.mimeType } }));
       parts.push({ text: prompt });
-
-      const result = await (genAI as any).models.generateContent({
-        model: modelId,
+      const result = await model.generateContent({
         contents: [{ role: "user", parts }],
-        config: { responseModalities: ["IMAGE", "TEXT"] } as any,
+        generationConfig: { responseModalities: ["IMAGE", "TEXT"] } as any,
       });
-
-      const response = result.response;
+      const response = await result.response;
       let b64 = "";
       for (const part of response.candidates?.[0]?.content?.parts || []) {
-        if ((part as any).inlineData) { b64 = (part as any).inlineData.data; break; }
+        if (part.inlineData?.data) { b64 = part.inlineData.data; break; }
       }
       return res.json({ b64 });
     }
-
     res.status(400).json({ error: "Invalid action." });
   } catch (e: any) {
     res.status(500).json({ error: e.message });

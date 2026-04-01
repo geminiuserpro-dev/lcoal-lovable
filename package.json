@@ -12,6 +12,7 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
+    "@ai-sdk/google": "^3.0.55",
     "@daytonaio/sdk": "^0.150.0",
     "@google/genai": "^1.44.0",
     "@radix-ui/react-accordion": "^1.2.12",
@@ -46,6 +47,7 @@
     "@types/compression": "^1.8.1",
     "@vercel/speed-insights": "^2.0.0",
     "@vitejs/plugin-react": "^5.0.4",
+    "ai": "^6.0.142",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",
@@ -78,6 +80,7 @@
     "tailwind-merge": "^3.5.0",
     "vaul": "^1.1.2",
     "vite": "^6.2.0",
+    "zod": "^4.3.6",
     "zustand": "^5.0.11"
   },
   "devDependencies": {

@@ -2436,8 +2436,8 @@ async function streamChatClaude({
       const parts: any[] = [];
       if (msg.images) {
         for (const imgUrl of msg.images) {
-           const match = imgUrl.match(/^data:(image\/[a-zA-Z]+);base64,(.+)$/);
-           if (match) parts.push({ type: "image", source: { type: "base64", media_type: match[1], data: match[2] } });
+          const match = imgUrl.match(/^data:(image\/[a-zA-Z]+);base64,(.+)$/);
+          if (match) parts.push({ type: "image", source: { type: "base64", media_type: match[1], data: match[2] } });
         }
       }
       if (msg.content) parts.push({ type: "text", text: msg.content });
@@ -2778,166 +2778,77 @@ async function streamChatGemini({
   onDone: (finishReason: string | null, thoughtSignature?: string) => void;
   onError: (err: string) => void;
 }) {
-  // ── Gemini path ──
   try {
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey || apiKey === "undefined") {
-      throw new Error("Gemini API key is not configured. Please set it in the environment.");
-    }
-    const ai = new GoogleGenAI({ apiKey });
+    const sandboxId = localStorage.getItem("sandboxId");
+    const activeModel = localStorage.getItem("activeModel") || "gemini-3.1-pro-preview";
 
-    // ---------------------------------------------------------------------------
-    // Format messages for Gemini API
-    // Per docs: thoughtSignature must be embedded inside the functionCall part
-    // itself (at the Part level), NOT as a separate thought part or message field.
-    // Only the FIRST functionCall part in each step carries the signature.
-    // ---------------------------------------------------------------------------
-    const rawFormattedMessages: any[] = [];
-    for (const msg of messages) {
-      if (msg.role === "system") continue;
-
-      const role = msg.role === "assistant" ? "model" : "user";
-      const parts: any[] = [];
-
-      if (msg.role === "user") {
-        if (msg.content) parts.push({ text: msg.content });
-        if (msg.images) {
-          for (const imgUrl of msg.images) {
-             const match = imgUrl.match(/^data:(image\/[a-zA-Z]+);base64,(.+)$/);
-             if (match) parts.push({ inlineData: { mimeType: match[1], data: match[2] } });
-          }
-        }
-
-      } else if (msg.role === "assistant") {
-        if (msg.content) parts.push({ text: msg.content });
-        if (msg.tool_calls) {
-          let firstFCInStep = true;
-          for (const tc of msg.tool_calls) {
-            let args: Record<string, any> = {};
-            try { args = JSON.parse(tc.function.arguments); } catch { args = {}; }
-
-            const fcPart: any = {
-              functionCall: { name: tc.function.name, args },
-            };
-            // Docs: signature goes on the first functionCall part only.
-            // Subsequent parallel calls in the same step have no signature.
-            if (firstFCInStep && tc.thoughtSignature) {
-              fcPart.thoughtSignature = tc.thoughtSignature;
-            }
-            firstFCInStep = false;
-            parts.push(fcPart);
-          }
-        }
-
-      } else if (msg.role === "tool") {
-        // Tool responses are sent as role "user" in Gemini
-        let toolResult: any = msg.content;
-        try { toolResult = JSON.parse(msg.content); } catch {
-          toolResult = { result: msg.content || "Success" };
-        }
-        if (typeof toolResult !== "object" || toolResult === null || Array.isArray(toolResult)) {
-          toolResult = { result: toolResult };
-        }
-        parts.push({
-          functionResponse: {
-            name: sanitizeToolName(msg.name || msg.tool_call_id || "unknown_tool"),
-            response: toolResult,
-          },
-        });
-      }
-
-      if (parts.length === 0) continue;
-      rawFormattedMessages.push({ role, parts });
-    }
-
-    // Merge consecutive messages of the same role (Gemini requires strict alternation)
-    const formattedMessages: any[] = [];
-    for (const msg of rawFormattedMessages) {
-      const last = formattedMessages[formattedMessages.length - 1];
-      if (last && last.role === msg.role) {
-        last.parts.push(...msg.parts);
-      } else {
-        formattedMessages.push({ ...msg, parts: [...msg.parts] });
-      }
-    }
-
-    // Gemini strictly requires the conversation to start and end with "user"
-    if (formattedMessages.length === 0) {
-      formattedMessages.push({ role: "user", parts: [{ text: "Hello" }] });
-    } else if (formattedMessages[0].role !== "user") {
-      formattedMessages.unshift({ role: "user", parts: [{ text: "Hello" }] });
-    }
-    if (formattedMessages[formattedMessages.length - 1].role !== "user") {
-      formattedMessages.push({ role: "user", parts: [{ text: "Please continue." }] });
-    }
-
-    const geminiTools = convertToolsToGemini(toolDefinitions);
-
-    const responseStream = await ai.models.generateContentStream({
-      model: "gemini-3-flash-preview",
-      contents: formattedMessages,
-      config: {
-        systemInstruction: SYSTEM_PROMPT,
-        tools: [{ functionDeclarations: geminiTools }],
-        temperature: 0.7,
-        thinkingConfig: { includeThoughts: true },
-      },
+    const response = await fetch("/api/ai/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        messages,
+        modelId: activeModel,
+        sandboxId
+      })
     });
 
-    // Pre-generate stable IDs for tool calls so React keys don't change across chunks
-    const stableIds = new Map<number, string>();
+    if (!response.ok) {
+      let errorText = response.statusText;
+      try {
+        const errJson = await response.json();
+        if (errJson.error) errorText = errJson.error;
+      } catch { }
+      throw new Error(`API Error: ${errorText}`);
+    }
+
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error("No reader available");
+
+    const decoder = new TextDecoder();
+    let buffer = "";
     let toolCallIndex = 0;
-    let lastThoughtSignature: string | undefined;
 
-    for await (const chunk of responseStream) {
-      const candidate = chunk.candidates?.[0];
-      if (!candidate) continue;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
 
-      const parts = candidate.content?.parts || [];
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
 
-      for (const part of parts) {
-        // Skip raw thought parts (we only care about thoughtSignature on FC parts)
-        if ((part as any).thought === true) continue;
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+        const jsonStr = line.slice(6).trim();
+        if (!jsonStr) continue;
 
-        // Capture signature — docs say it lives on the part itself
-        const sig: string | undefined =
-          (part as any).thoughtSignature ??
-          (part.functionCall as any)?.thoughtSignature;
-        if (sig) lastThoughtSignature = sig;
+        try {
+          const part = JSON.parse(jsonStr);
 
-        if (part.text !== undefined) {
-          onDelta(part.text);
-        } else if (part.functionCall) {
-          // Use a stable ID for this index so React keys remain consistent
-          if (!stableIds.has(toolCallIndex)) {
-            stableIds.set(toolCallIndex, `call_${toolCallIndex}_${crypto.randomUUID()} `);
+          // Handle Vercel AI SDK 6.0 Stream Parts
+          if (part.type === "text-delta") {
+            onDelta(part.text);
+          } else if (part.type === "tool-call") {
+            onToolCallDelta([{
+              index: toolCallIndex++,
+              id: part.toolCallId,
+              function: {
+                name: part.toolName,
+                arguments: JSON.stringify(part.args || {})
+              }
+            }]);
+          } else if (part.type === "finish") {
+            // End of stream handled by loop break
           }
-          const stableId = stableIds.get(toolCallIndex)!;
-
-          onToolCallDelta([{
-            index: toolCallIndex,
-            id: (part.functionCall as any).id || stableId,
-            function: {
-              name: desanitizeToolName(part.functionCall.name ?? ""),
-              arguments: JSON.stringify(part.functionCall.args || {}),
-            },
-            thoughtSignature: sig ?? lastThoughtSignature,
-          }]);
-          toolCallIndex++;
+        } catch (e) {
+          console.warn("Failed to parse stream part", e);
         }
       }
     }
 
-    onDone(null, lastThoughtSignature);
+    onDone("completed");
   } catch (error: any) {
     console.error("Chat error:", error);
     let errorMessage = error.message || "An error occurred during chat";
-    try {
-      if (errorMessage.startsWith("{") && errorMessage.includes('"' + 'error"')) {
-        const parsed = JSON.parse(errorMessage);
-        if (parsed.error?.message) errorMessage = parsed.error.message;
-      }
-    } catch { /* ignore parse errors */ }
 
     if (errorMessage.includes("429") || errorMessage.includes("RESOURCE_EXHAUSTED") || errorMessage.includes("quota")) {
       errorMessage = "You have exceeded your Gemini API quota. Please check your plan and billing details, or try again later.";
