@@ -11,6 +11,7 @@ import { toast } from "sonner";
 import { motion } from "motion/react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useFirebase } from "@/components/FirebaseProvider";
+import { useStore } from "@/store/store";
 import JSZip from "jszip";
 import { saveAs } from "file-saver";
 import PublishModal from "@/components/editor/PublishModal";
@@ -32,11 +33,11 @@ const EditorInner = () => {
     loadFromProject,
     projectName,
     setProjectName,
-    snapshotName,
     view,
     setView
   } = useSandbox();
   const { user } = useFirebase();
+  const snapshotName = useStore(s => s.snapshotName);
   const [initialized, setInitialized] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [showPublish, setShowPublish] = useState(false);
@@ -134,7 +135,7 @@ const EditorInner = () => {
       const newProjectId = await ProjectService.saveProject(
         nameToSave,
         projectDescription,
-        currentRepoUrl,
+        snapshotName,
         files,
         projectId || undefined
       );

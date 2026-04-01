@@ -1203,46 +1203,43 @@ export const SandboxProvider = ({ children }: { children: React.ReactNode }) => 
           case "imagegen__generate_image": {
             const prompt = args.prompt;
             const targetPath = args.target_path || "src/assets/image.jpg";
-            const width = args.width || 1024;
-            const height = args.height || 1024;
 
             if (!prompt) return { result: "Error: prompt is required", success: false };
 
             try {
-              const enhancedPrompt = prompt;
-
-              // Step 2: Generate with Imagen using enhanced prompt
               const { GoogleGenAI } = await import("@google/genai");
               const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
-              // Map legacy/incorrect model names to valid Gemini Imagen models
-              const rawModel = args.model || "imagen-3.0-generate-002";
-              const modelAliasMap: Record<string, string> = {
-                "flux.schnell": "imagen-3.0-generate-002",
-                "flux.dev": "imagen-3.0-generate-002",
-                "flux2.dev": "imagen-3.0-generate-002",
-                "imagen-4.0-fast-generate-001": "imagen-3.0-generate-002",
-              };
-              const modelToUse = modelAliasMap[rawModel] ?? (rawModel.startsWith("imagen") ? rawModel : "imagen-3.0-generate-002");
-              const aspectRatio = width === height ? "1:1" : width > height ? "16:9" : "9:16";
-
-              const result = await ai.models.generateImages({
-                model: modelToUse,
-                prompt: enhancedPrompt,
-                config: { numberOfImages: 1, outputMimeType: "image/jpeg", aspectRatio },
+              // Use Gemini's native image generation (works with standard API key)
+              const response = await ai.models.generateContent({
+                model: "gemini-2.0-flash-preview-image-generation",
+                contents: prompt,
+                config: { responseModalities: ["IMAGE", "TEXT"] } as any,
               });
 
-              const imgData = result.generatedImages?.[0]?.image?.imageBytes;
-              if (!imgData) return { result: "Failed to generate image: no image data returned", success: false };
+              // Extract image bytes from response
+              let b64 = "";
+              let mimeType = "image/jpeg";
+              for (const part of response.candidates?.[0]?.content?.parts || []) {
+                if (part.inlineData?.data) {
+                  b64 = part.inlineData.data;
+                  mimeType = part.inlineData.mimeType || "image/jpeg";
+                  break;
+                }
+              }
+              if (!b64) return { result: "Failed to generate image: no image data in response", success: false };
+
+              const ext = mimeType.includes("png") ? "png" : "jpg";
+              const finalPath = targetPath.replace(/\.(jpg|jpeg|png|webp)$/i, `.${ext}`) || targetPath;
 
               const sid = await ensureSandbox();
-              const destDir = targetPath.split("/").slice(0, -1).join("/");
+              const destDir = finalPath.split("/").slice(0, -1).join("/");
               if (destDir) await executeCommand(sid, `mkdir -p ${wd}/${destDir}`);
               const tmpFile = `.tmp_img_${Date.now()}.b64`;
-              await writeFile(sid, `${wd}/${tmpFile}`, imgData);
-              await executeCommand(sid, `base64 -d ${wd}/${tmpFile} > ${wd}/${targetPath} && rm ${wd}/${tmpFile}`);
+              await writeFile(sid, `${wd}/${tmpFile}`, b64);
+              await executeCommand(sid, `base64 -d ${wd}/${tmpFile} > ${wd}/${finalPath} && rm ${wd}/${tmpFile}`);
 
-              return { result: `Generated image saved to ${targetPath}\nOriginal prompt: "${prompt}"\nEnhanced prompt: "${enhancedPrompt.slice(0, 150)}..."`, success: true };
+              return { result: `Generated image saved to ${finalPath}\nPrompt: "${prompt}"`, success: true };
             } catch (e) {
               const msg = e instanceof Error ? e.message : "Generation failed";
               return { result: `Failed to generate image: ${msg}`, success: false };
@@ -1250,6 +1247,7 @@ export const SandboxProvider = ({ children }: { children: React.ReactNode }) => 
           }
 
           case "imagegen__edit_image": {
+
             const imagePaths = args.image_paths || [];
             const prompt = args.prompt;
             const targetPath = args.target_path;
