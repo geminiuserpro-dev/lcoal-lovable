@@ -42,7 +42,7 @@ export const ProjectService = {
       name,
       description: description || null,
       ownerId: userId,
-      snapshotName: snapshotName || null,
+      repoUrl: snapshotName || null,
       lastModified: serverTimestamp(),
     };
     
