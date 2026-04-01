@@ -1215,8 +1215,15 @@ export const SandboxProvider = ({ children }: { children: React.ReactNode }) => 
               const { GoogleGenAI } = await import("@google/genai");
               const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
-              const requestedModel = args.model || "imagen-4.0-fast-generate-001";
-              const modelToUse = requestedModel.includes("gemini") ? "imagen-4.0-fast-generate-001" : requestedModel;
+              // Map legacy/incorrect model names to valid Gemini Imagen models
+              const rawModel = args.model || "imagen-3.0-generate-002";
+              const modelAliasMap: Record<string, string> = {
+                "flux.schnell": "imagen-3.0-generate-002",
+                "flux.dev": "imagen-3.0-generate-002",
+                "flux2.dev": "imagen-3.0-generate-002",
+                "imagen-4.0-fast-generate-001": "imagen-3.0-generate-002",
+              };
+              const modelToUse = modelAliasMap[rawModel] ?? (rawModel.startsWith("imagen") ? rawModel : "imagen-3.0-generate-002");
               const aspectRatio = width === height ? "1:1" : width > height ? "16:9" : "9:16";
 
               const result = await ai.models.generateImages({

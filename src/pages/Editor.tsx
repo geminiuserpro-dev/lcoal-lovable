@@ -32,6 +32,7 @@ const EditorInner = () => {
     loadFromProject,
     projectName,
     setProjectName,
+    snapshotName,
     view,
     setView
   } = useSandbox();
@@ -47,12 +48,12 @@ const EditorInner = () => {
   const [searchParams, setSearchParams] = useSearchParams();
   const projectIdFromUrl = searchParams.get("project");
 
-  const latestState = useRef({ files, projectId, projectName, user });
+  const latestState = useRef({ files, projectId, projectName, snapshotName, user });
   const lastSavedFilesRef = useRef<Map<string, any>>(new Map());
 
   useEffect(() => {
-    latestState.current = { files, projectId, projectName, user };
-  }, [files, projectId, projectName, user]);
+    latestState.current = { files, projectId, projectName, snapshotName, user };
+  }, [files, projectId, projectName, snapshotName, user]);
 
   useEffect(() => {
     const autoSaveInterval = setInterval(async () => {
@@ -85,7 +86,7 @@ const EditorInner = () => {
         const newProjectId = await ProjectService.saveProject(
           nameToSave,
           projectDescription,
-          state.currentRepoUrl,
+          state.snapshotName || null,
           state.files,
           state.projectId || undefined
         );
