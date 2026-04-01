@@ -1276,7 +1276,7 @@ export const SandboxProvider = ({ children }: { children: React.ReactNode }) => 
               const { GoogleGenAI } = await import("@google/genai");
               const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
               const response = await ai.models.generateContent({
-                model: "gemini-2.5-flash-preview-image-generation",
+                model: "gemini-2.0-flash-preview-image-generation",
                 contents: { parts },
                 config: { responseModalities: ["IMAGE", "TEXT"] } as any,
               });
