@@ -193,27 +193,22 @@ app.post("/api/daytona", async (req, res) => {
         res.json({ result: data.result, exitCode: data.exitCode });
       } else if (action === "writeFile") {
         fileListCache.delete(`${sandboxId}:/home/daytona/repo`); // invalidate on write
-        const b64 = Buffer.from(params.content || "", "utf8").toString("base64");
-        const data = await sandbox.process.executeCommand(`mkdir -p $(dirname '${params.filePath}') && printf '%s' '${b64}' | base64 -d > '${params.filePath}'`);
-        res.json({ success: true, result: data.result, exitCode: data.exitCode });
+        const content = params.content || "";
+        const dir = params.filePath.split("/").slice(0, -1).join("/");
+        if (dir) {
+          try { await sandbox.fs.createFolder(dir, "755"); } catch (e) {} // ignore if exists
+        }
+        await sandbox.fs.uploadFile(Buffer.from(content, "utf8"), params.filePath);
+        res.json({ success: true });
       } else if (action === "readFile") {
         const fp = params.filePath as string;
-        // Detect binary files by extension — don't try to display as text
-        const binaryExts = /\.(png|jpe?g|gif|webp|ico|svg|woff2?|ttf|otf|eot|wasm|mp[34]|ogg|webm|pdf|zip|tar|gz|bz2|7z|exe|dll|so|dylib|bin|dat|lock)$/i;
-        if (binaryExts.test(fp)) {
-          const sizeData = await sandbox.process.executeCommand(`stat -c%s '${fp}' 2>/dev/null || echo 0`);
-          const size = parseInt(sizeData.result?.trim() || "0", 10);
-          res.json({ content: `[Binary file: ${fp.split("/").pop()} (${(size / 1024).toFixed(1)} KB)]`, exitCode: 0 });
-        } else {
-          // Check size first — skip files over 500KB to avoid editor slowdowns
-          const sizeData = await sandbox.process.executeCommand(`stat -c%s '${fp}' 2>/dev/null || echo 0`);
-          const size = parseInt(sizeData.result?.trim() || "0", 10);
-          if (size > 512_000) {
-            res.json({ content: `[File too large to display: ${(size / 1024).toFixed(0)} KB]`, exitCode: 0 });
-          } else {
-            const data = await sandbox.process.executeCommand(`base64 -w 0 '${fp}'`);
-            res.json({ content: Buffer.from(data.result || "", "base64").toString("utf8"), exitCode: data.exitCode });
-          }
+        try {
+          const buffer = await sandbox.fs.downloadFile(fp);
+          const content = buffer.toString("utf8");
+          res.json({ content, exitCode: 0 });
+        } catch (e: any) {
+          // Fallback to binary detection if it fails or if it's actually binary
+          res.json({ content: `[Error reading file: ${e.message}]`, exitCode: 1 });
         }
       } else if (action === "listFiles") {
         const dir = params.dir || "/home/daytona/repo";
