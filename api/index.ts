@@ -55,7 +55,7 @@ let daytonaClient: Daytona | null = null;
 function getDaytona(): Daytona {
   if (!daytonaClient) {
     const apiKey = process.env.DAYTONA_API_KEY;
-    const apiUrl = process.env.DAYTONA_API_URL || "https://app.daytona.io/api";
+    const apiUrl = process.env.DAYTONA_API_URL || process.env.DAYTONA_SERVER_URL || "https://app.daytona.io/api";
     const target = process.env.DAYTONA_TARGET || "us";
     if (!apiKey) throw new Error("DAYTONA_API_KEY is not set");
     daytonaClient = new Daytona({ apiKey, apiUrl, target });
@@ -175,7 +175,7 @@ app.post("/api/daytona", async (req, res) => {
         let previewUrl = `https://${port}-${sandboxId}.proxy.daytona.works`; // fallback
         let previewToken = "";
         try {
-          const apiBase = process.env.DAYTONA_API_URL || "https://app.daytona.io/api";
+          const apiBase = process.env.DAYTONA_API_URL || process.env.DAYTONA_SERVER_URL || "https://app.daytona.io/api";
           const signedUrl = `${apiBase}/sandbox/${sandboxId}/ports/${port}/signed-preview-url?expiresInSeconds=3600`;
           const tr = await fetch(signedUrl, {
             headers: { "Authorization": `Bearer ${process.env.DAYTONA_API_KEY}` }
