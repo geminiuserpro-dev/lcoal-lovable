@@ -236,9 +236,25 @@ export const SandboxProvider = ({ children }: { children: React.ReactNode }) => 
     return promise;
   }, [setSandboxId, setStatus, setError]);
 
-  const setSelectedFile = useCallback((path: string) => {
+  const setSelectedFile = useCallback(async (path: string) => {
     setSelectedFileRaw(path);
-  }, [setSelectedFileRaw]);
+    // Lazy load content if it's currently an empty placeholder from the instant-listing
+    const file = latestState.current.files.get(path);
+    if (file && file.content === "") {
+      try {
+        const sid = sandboxIdRef.current;
+        if (!sid) return;
+        const wd = workDirRef.current.endsWith("/") ? workDirRef.current : workDirRef.current + "/";
+        const data = await readFile(sid, wd + path);
+        // Only update if it successfully read, to avoid overwriting user edits that mapped to ""
+        if (data && data.content !== undefined) {
+          addOrUpdateFile(path, data.content);
+        }
+      } catch (e) {
+        console.warn(`Lazy load failed for ${path}:`, e);
+      }
+    }
+  }, [setSelectedFileRaw, addOrUpdateFile]);
 
   const withSandboxRetry = useCallback(async <T,>(fn: (sid: string) => Promise<T>): Promise<T> => {
     try {
@@ -252,8 +268,8 @@ export const SandboxProvider = ({ children }: { children: React.ReactNode }) => 
         toast.info("Restoring files to new sandbox...");
         const wd = workDirRef.current;
 
-        // Restore all files
-        const currentFiles = filesRef.current;
+        // Restore all files to new sandbox
+        const currentFiles = latestState.current.files;
         for (const [path, file] of currentFiles.entries()) {
           const dir = path.split("/").slice(0, -1).join("/");
           if (dir) {
@@ -528,7 +544,7 @@ export const SandboxProvider = ({ children }: { children: React.ReactNode }) => 
 
   const executeToolCall = useCallback(
     async function execute(toolCall: ToolCall, retryCount = 0): Promise<{ result: string; success: boolean }> {
-      const currentFiles = filesRef.current;
+      const currentFiles = latestState.current.files;
       const wd = workDirRef.current;
 
       // Normalize tool names: the AI uses code--* names, executor uses lov_* names
