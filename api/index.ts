@@ -170,20 +170,29 @@ app.post("/api/daytona", async (req, res) => {
         // Start dev server from a stable dir to avoid getcwd issues
         const data = await sandbox.process.executeCommand(`mkdir -p ${wd} && cd ${wd} && (npm run dev -- --port ${port} --host 0.0.0.0 > /tmp/vite.log 2>&1 &)`);
 
-        // Fetch preview token
+        // Fetch SIGNED preview URL (token embedded in URL — no OAuth redirect needed)
+        // Standard token causes browser OAuth → 400 "authentication state verification failed"
+        let previewUrl = `https://${port}-${sandboxId}.proxy.daytona.works`; // fallback
         let previewToken = "";
         try {
-          const tokenUrl = `${process.env.DAYTONA_API_URL || "https://app.daytona.io/api"}/sandbox/${sandboxId}/preview-token`;
-          const tr = await fetch(tokenUrl, { 
-            headers: { "Authorization": `Bearer ${process.env.DAYTONA_API_KEY}` } 
+          const apiBase = process.env.DAYTONA_API_URL || "https://app.daytona.io/api";
+          const signedUrl = `${apiBase}/sandbox/${sandboxId}/ports/${port}/signed-preview-url?expiresInSeconds=3600`;
+          const tr = await fetch(signedUrl, {
+            headers: { "Authorization": `Bearer ${process.env.DAYTONA_API_KEY}` }
           });
           if (tr.ok) {
-            previewToken = (await tr.json()).token || "";
+            const json = await tr.json();
+            // Signed URL format: https://{port}-{token}.proxy.daytona.works
+            // This bypasses OAuth and works directly in iframes
+            if (json.url) {
+              previewUrl = json.url;
+              previewToken = json.token || "";
+            }
           } else {
-            console.error(`Token fetch failed: ${tr.status} ${tr.statusText}`);
+            console.error(`Signed preview URL fetch failed: ${tr.status} ${tr.statusText}`);
           }
         } catch (e) {
-          console.error("Failed to fetch preview token:", e);
+          console.error("Failed to fetch signed preview URL:", e);
         }
 
         lastSandboxLogs = { 
@@ -193,12 +202,13 @@ app.post("/api/daytona", async (req, res) => {
         };
 
         res.json({ 
-          previewUrl: `https://${port}-${sandboxId}.proxy.daytona.works`,
+          previewUrl,
           previewToken,
           serverReady: true,
           installLog: lastSandboxLogs.install,
           viteLog: lastSandboxLogs.vite
         });
+
       } else if (action === "getLogs") {
         const data = await sandbox.process.executeCommand(`tail -n 100 /tmp/vite.log || echo "No logs"`);
         res.json({ result: data.result, exitCode: data.exitCode });
