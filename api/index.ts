@@ -187,6 +187,16 @@ app.post("/api/daytona", async (req, res) => {
       res.json({ status: "ready" }); // Simplified for SDK
     } else {
       const sandbox = await daytona.get(sandboxId);
+      const wd = "/home/daytona/repo";
+      const normalizePath = (p: string) => {
+        let normalized = p;
+        if (p.startsWith("/project/")) {
+          normalized = p.replace("/project/", `${wd}/`);
+        } else if (!p.startsWith("/")) {
+          normalized = `${wd}/${p}`;
+        }
+        return normalized;
+      };
       
       if (action === "execute") {
         const data = await sandbox.process.executeCommand(params.command);
@@ -194,14 +204,15 @@ app.post("/api/daytona", async (req, res) => {
       } else if (action === "writeFile") {
         fileListCache.delete(`${sandboxId}:/home/daytona/repo`); // invalidate on write
         const content = params.content || "";
-        const dir = params.filePath.split("/").slice(0, -1).join("/");
+        const fp = normalizePath(params.filePath);
+        const dir = fp.split("/").slice(0, -1).join("/");
         if (dir) {
           try { await sandbox.fs.createFolder(dir, "755"); } catch (e) {} // ignore if exists
         }
-        await sandbox.fs.uploadFile(Buffer.from(content, "utf8"), params.filePath);
+        await sandbox.fs.uploadFile(Buffer.from(content, "utf8"), fp);
         res.json({ success: true });
       } else if (action === "readFile") {
-        const fp = params.filePath as string;
+        const fp = normalizePath(params.filePath as string);
         try {
           const buffer = await sandbox.fs.downloadFile(fp);
           const content = buffer.toString("utf8");
