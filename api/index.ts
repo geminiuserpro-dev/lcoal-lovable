@@ -538,24 +538,7 @@ app.post("/api/ai/chat", async (req, res) => {
       }
     });
 
-    const streamResponse = result.toDataStreamResponse();
-    res.status(streamResponse.status);
-    streamResponse.headers.forEach((value, key) => {
-      res.setHeader(key, value);
-    });
-    
-    // Pipe the standard web ReadableStream to the Express response
-    const reader = streamResponse.body?.getReader();
-    if (reader) {
-      if (res.flushHeaders) res.flushHeaders();
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        res.write(value);
-      }
-    }
-    res.end();
-
+    result.pipeUIMessageStreamToResponse(res);
   } catch (e: any) {
     console.error("AI SDK Error:", e);
     res.status(500).json({ error: e.message });
