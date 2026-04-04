@@ -342,10 +342,10 @@ app.post("/api/daytona", async (req, res) => {
       } else if (action === "setupWatcher") {
         const { workDir, watchDir, command } = params;
         const targetDir = `${workDir || "/home/daytona/repo"}/${watchDir || "src"}`;
-        
+
         // Ensure chokidar-cli is installed globally in the sandbox
         await sandbox.process.executeCommand(`npm install -g chokidar-cli`);
-        
+
         // Run chokidar to watch the dir and trigger the command in the background
         const data = await sandbox.process.executeCommand(
           `nohup chokidar "${targetDir}/**" -c "${command || 'npm run build'}" > /tmp/watcher.log 2>&1 &`
@@ -567,11 +567,13 @@ app.post("/api/firecrawl/:action", async (req, res) => {
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-const publicPath = path.join(process.cwd(), "dist");
-app.use(express.static(publicPath));
-app.get("*", (req, res) => {
-  if (req.path.startsWith("/api/")) return res.status(404).json({ error: "API not found" });
-  res.sendFile(path.join(publicPath, "index.html"));
-});
+if (process.env.NODE_ENV === "production" || process.env.VERCEL) {
+  const publicPath = path.join(process.cwd(), "dist");
+  app.use(express.static(publicPath));
+  app.get("*", (req, res) => {
+    if (req.path.startsWith("/api/")) return res.status(404).json({ error: "API not found" });
+    res.sendFile(path.join(publicPath, "index.html"));
+  });
+}
 
 export default app;
