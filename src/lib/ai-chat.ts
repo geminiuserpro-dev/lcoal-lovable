@@ -2818,6 +2818,7 @@ async function streamChatGemini({
 
       for (const line of lines) {
         if (!line.startsWith("data: ")) continue;
+        if (line.trim() === "data: [DONE]") continue;
         const jsonStr = line.slice(6).trim();
         if (!jsonStr) continue;
 

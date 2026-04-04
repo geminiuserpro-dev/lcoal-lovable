@@ -339,6 +339,18 @@ app.post("/api/daytona", async (req, res) => {
       } else if (action === "delete") {
         await daytona.delete(sandbox);
         res.json({ success: true });
+      } else if (action === "setupWatcher") {
+        const { workDir, watchDir, command } = params;
+        const targetDir = `${workDir || "/home/daytona/repo"}/${watchDir || "src"}`;
+        
+        // Ensure chokidar-cli is installed globally in the sandbox
+        await sandbox.process.executeCommand(`npm install -g chokidar-cli`);
+        
+        // Run chokidar to watch the dir and trigger the command in the background
+        const data = await sandbox.process.executeCommand(
+          `nohup chokidar "${targetDir}/**" -c "${command || 'npm run build'}" > /tmp/watcher.log 2>&1 &`
+        );
+        res.json({ success: true, message: "Watcher started", exitCode: data.exitCode });
       } else if (action === "deleteAll") {
         const list = await daytona.list();
         const items = (list as any).items || [];
