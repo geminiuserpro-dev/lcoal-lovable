@@ -290,7 +290,6 @@ app.post("/api/ai/chat", async (req, res) => {
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) return res.status(500).json({ error: "GEMINI_API_KEY is not set." });
 
-    const googleAI = createGoogleGenerativeAI({ apiKey });
     const wd = "/home/daytona/repo";
     const normalizePath = (p: string) => {
       let normalized = p;
@@ -303,68 +302,93 @@ app.post("/api/ai/chat", async (req, res) => {
     };
 
     const sandbox = sandboxId ? await getDaytona().get(sandboxId) : null;
-    const model = googleAI(modelId.startsWith("gemini-3") ? modelId : "gemini-1.5-flash");
-
-    const result = streamText({
-      model,
-      messages,
-      system,
-      stopWhen: stepCountIs(10),
-      tools: {
-        writeFile: tool({
-          description: "Write content to a file in the sandbox.",
-          parameters: z.object({
-            filePath: z.string().describe("The path to the file"),
-            content: z.string().describe("The content to write")
-          }),
-          execute: async ({ filePath, content }) => {
-            if (!sandbox) return "Error: No sandbox active.";
-            const fp = normalizePath(filePath);
-            const dir = fp.split("/").slice(0, -1).join("/");
-            if (dir) { try { await sandbox.fs.createFolder(dir, "755"); } catch (e) {} }
-            await sandbox.fs.uploadFile(Buffer.from(content, "utf8"), fp);
-            return `Successfully wrote to ${filePath}`;
-          }
-        }),
-        readFile: tool({
-          description: "Read the content of a file from the sandbox.",
-          parameters: z.object({ filePath: z.string().describe("The path to the file") }),
-          execute: async ({ filePath }) => {
-            if (!sandbox) return "Error: No sandbox active.";
-            const fp = normalizePath(filePath);
-            const buffer = await sandbox.fs.downloadFile(fp);
-            return buffer.toString("utf8");
-          }
-        }),
-        executeCommand: tool({
-          description: "Run a shell command in the sandbox repository.",
-          parameters: z.object({ command: z.string().describe("The command to execute") }),
-          execute: async ({ command }) => {
-            if (!sandbox) return "Error: No sandbox active.";
-            const data = await sandbox.process.executeCommand(`cd ${wd} && ${command}`);
-            return data.result || "Command executed";
-          }
-        }),
-        listFiles: tool({
-          description: "List files in the sandbox repository.",
-          parameters: z.object({ directory: z.string().optional().describe("The directory to list") }),
-          execute: async ({ directory }) => {
-            if (!sandbox) return "Error: No sandbox active.";
-            const data = await sandbox.process.executeCommand(`find ${directory || wd} -maxdepth 4 -not -path '*/node_modules/*' -not -path '*/.git/*' -type f | head -100`);
-            return data.result || "(empty)";
-          }
-        })
-      }
-    });
-
-    res.setHeader("Content-Type", "text/event-stream");
-    res.setHeader("Cache-Control", "no-cache");
-    res.setHeader("Connection", "keep-alive");
-
-    for await (const part of result.fullStream) {
-      res.write(`data: ${JSON.stringify(part)}\n\n`);
+    
+    // Choose Provider Logic (Switch-based as requested)
+    let provider = "vercel";
+    if (modelId.toLowerCase().includes("official") || modelId.toLowerCase().includes("vision")) {
+      provider = "official";
     }
-    res.end();
+
+    switch (provider) {
+      case "vercel": {
+        const googleAI = createGoogleGenerativeAI({ apiKey });
+        const model = googleAI(modelId.startsWith("gemini-3") ? modelId : "gemini-1.5-flash");
+
+        const result = streamText({
+          model,
+          messages,
+          system,
+          stopWhen: stepCountIs(10),
+          tools: {
+            writeFile: tool({
+              description: "Write content to a file in the sandbox.",
+              parameters: zodSchema(z.object({
+                filePath: z.string().describe("The path to the file"),
+                content: z.string().describe("The content to write")
+              })),
+              execute: async ({ filePath, content }: { filePath: string; content: string }) => {
+                if (!sandbox) return "Error: No sandbox active.";
+                const fp = normalizePath(filePath);
+                const dir = fp.split("/").slice(0, -1).join("/");
+                if (dir) { try { await sandbox.fs.createFolder(dir, "755"); } catch (e) {} }
+                await sandbox.fs.uploadFile(Buffer.from(content, "utf8"), fp);
+                return `Successfully wrote to ${filePath}`;
+              }
+            }),
+            readFile: tool({
+              description: "Read the content of a file from the sandbox.",
+              parameters: zodSchema(z.object({ filePath: z.string().describe("The path to the file") })),
+              execute: async ({ filePath }: { filePath: string }) => {
+                if (!sandbox) return "Error: No sandbox active.";
+                const fp = normalizePath(filePath);
+                const buffer = await sandbox.fs.downloadFile(fp);
+                return buffer.toString("utf8");
+              }
+            }),
+            executeCommand: tool({
+              description: "Run a shell command in the sandbox repository.",
+              parameters: zodSchema(z.object({ command: z.string().describe("The command to execute") })),
+              execute: async ({ command }: { command: string }) => {
+                if (!sandbox) return "Error: No sandbox active.";
+                const data = await sandbox.process.executeCommand(`cd ${wd} && ${command}`);
+                return data.result || "Command executed";
+              }
+            }),
+            listFiles: tool({
+              description: "List files in the sandbox repository.",
+              parameters: zodSchema(z.object({ directory: z.string().optional().describe("The directory to list") })),
+              execute: async ({ directory }: { directory?: string }) => {
+                if (!sandbox) return "Error: No sandbox active.";
+                const data = await sandbox.process.executeCommand(`find ${directory || wd} -maxdepth 4 -not -path '*/node_modules/*' -not -path '*/.git/*' -type f | head -100`);
+                return data.result || "(empty)";
+              }
+            })
+          }
+        });
+
+        res.setHeader("Content-Type", "text/event-stream");
+        res.setHeader("Cache-Control", "no-cache");
+        res.setHeader("Connection", "keep-alive");
+
+        for await (const part of result.fullStream) {
+          res.write(`data: ${JSON.stringify(part)}\n\n`);
+        }
+        res.end();
+        break;
+      }
+      case "official": {
+        // Simple text generation for Official SDK (ofadl)
+        const ai = new GoogleGenAI({ apiKey });
+        const result = await ai.models.generateContent({
+          model: modelId.startsWith("gemini-") ? modelId : "gemini-2.0-flash",
+          contents: messages.map((m: any) => ({ role: m.role, parts: [{ text: m.content }] })),
+        });
+        res.json({ text: result.text || "" });
+        break;
+      }
+      default:
+        res.status(400).json({ error: "Invalid provider selection." });
+    }
   } catch (e: any) {
     res.status(500).json({ error: e.message });
   }
@@ -377,35 +401,28 @@ app.post("/api/gemini", async (req, res) => {
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) return res.status(500).json({ error: "GEMINI_API_KEY is not set." });
 
-    const genAI = new GoogleGenAI({ apiKey });
-    const modelId = "gemini-3.1-flash-image-preview";
-    const model = genAI.getGenerativeModel({ model: modelId });
+    const ai = new GoogleGenAI({ apiKey });
+    const modelId = "gemini-2.0-flash";
 
     if (action === "generateImage") {
-      const result = await model.generateContent({
+      const result = await ai.models.generateContent({
+        model: modelId,
         contents: [{ role: "user", parts: [{ text: prompt }] }],
-        generationConfig: { responseModalities: ["IMAGE", "TEXT"] } as any,
+        config: { responseModalities: ["IMAGE", "TEXT"] } as any,
       });
-      const response = await result.response;
-      let b64 = "";
-      let mimeType = "image/jpeg";
-      for (const part of response.candidates?.[0]?.content?.parts || []) {
-        if (part.inlineData?.data) { b64 = part.inlineData.data; mimeType = part.inlineData.mimeType || "image/jpeg"; break; }
-      }
-      return res.json({ b64, mimeType });
+      const b64 = result.text || "";
+      return res.json({ b64 });
 
     } else if (action === "editImage") {
-      const parts: any[] = (images || []).map((img: any) => ({ inlineData: { data: img.data, mimeType: img.mimeType } }));
-      parts.push({ text: prompt });
-      const result = await model.generateContent({
-        contents: [{ role: "user", parts }],
-        generationConfig: { responseModalities: ["IMAGE", "TEXT"] } as any,
+      const response = await ai.models.generateContent({
+        model: modelId,
+        contents: [
+          ...(images || []).map((img: any) => ({ inlineData: { data: img.data, mimeType: img.mimeType } })),
+          { text: prompt }
+        ],
+        config: { responseModalities: ["IMAGE", "TEXT"] } as any,
       });
-      const response = await result.response;
-      let b64 = "";
-      for (const part of response.candidates?.[0]?.content?.parts || []) {
-        if (part.inlineData?.data) { b64 = part.inlineData.data; break; }
-      }
+      const b64 = response.text || "";
       return res.json({ b64 });
     }
     res.status(400).json({ error: "Invalid action." });
