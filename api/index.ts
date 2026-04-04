@@ -500,24 +500,64 @@ app.post("/api/ai/chat", async (req, res) => {
           parameters: zodSchema(z.object({
             filePath: z.string().describe("The path to the file (can start with /project/ or be relative)"),
             content: z.string().describe("The content to write")
-  v
-
-      const result = await (genAI as any).models.generateContent({
-              model: modelId,
-              contents: [{ role: "user", parts }],
-              config: { responseModalities: ["IMAGE", "TEXT"] } as any,
-            });
-
-            const response = result.response;
-            let b64 = "";
-            for(const part of response.candidates?.[0]?.content?.parts || []) {
-              if((part as any).inlineData) { b64 = (part as any).inlineData.data; break; }
+          })),
+          execute: async ({ filePath, content }) => {
+            if (!sandbox) throw new Error("Sandbox not initialized");
+            const fp = normalizePath(filePath);
+            const dir = fp.split("/").slice(0, -1).join("/");
+            if (dir) {
+              try { await sandbox.fs.createFolder(dir, "755"); } catch (e) { }
+            }
+            await sandbox.fs.uploadFile(Buffer.from(content, "utf8"), fp);
+            return { success: true, message: `File ${filePath} written.` };
+          }
+        }),
+        readFile: tool({
+          description: "Read content from a file in the sandbox.",
+          parameters: zodSchema(z.object({
+            filePath: z.string().describe("The path to the file to read")
+          })),
+          execute: async ({ filePath }) => {
+            if (!sandbox) throw new Error("Sandbox not initialized");
+            const fp = normalizePath(filePath);
+            const buffer = await sandbox.fs.downloadFile(fp);
+            return { content: buffer.toString("utf8") };
+          }
+        }),
+        executeCommand: tool({
+          description: "Execute a command in the sandbox.",
+          parameters: zodSchema(z.object({
+            command: z.string().describe("The command to execute")
+          })),
+          execute: async ({ command }) => {
+            if (!sandbox) throw new Error("Sandbox not initialized");
+            const data = await sandbox.process.executeCommand(command);
+            return { result: data.result, exitCode: data.exitCode };
+          }
+        })
       }
-      return res.json({ b64 });
-    }
+    });
 
-    res.status(400).json({ error: "Invalid action." });
+    const streamResponse = result.toDataStreamResponse();
+    res.status(streamResponse.status);
+    streamResponse.headers.forEach((value, key) => {
+      res.setHeader(key, value);
+    });
+    
+    // Pipe the standard web ReadableStream to the Express response
+    const reader = streamResponse.body?.getReader();
+    if (reader) {
+      if (res.flushHeaders) res.flushHeaders();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        res.write(value);
+      }
+    }
+    res.end();
+
   } catch (e: any) {
+    console.error("AI SDK Error:", e);
     res.status(500).json({ error: e.message });
   }
 });
