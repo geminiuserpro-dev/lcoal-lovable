@@ -1,5 +1,10 @@
 import { GoogleGenAI, Type } from "@google/genai";
 
+// ── Model name constants ──────────────────────────────────────────────────────
+const MODEL_CLAUDE_SONNET = "claude-sonnet-4-6";
+const MODEL_CLAUDE_HAIKU = "anthropic/claude-haiku-4-5";
+const MODEL_GEMINI_DEFAULT = "google/gemini-3-flash";
+
 const SYSTEM_PROMPT = `
 ## Role Definition
 
@@ -2215,6 +2220,15 @@ function normalizeGeminiType(t: string): string {
 }
 
 // Recursively fix schema types so Gemini REST API validation accepts them
+// ── Schema normalization note ─────────────────────────────────────────────────
+// fixSchemaTypes() below normalizes schemas for the Gemini REST wire format
+// (uppercase types: OBJECT, STRING, etc.).
+//
+// buildAnthropicTools() contains an inline `cvt` closure that performs an
+// equivalent normalization for the Anthropic wire format (lowercase types).
+// The two are intentionally separate — each API's schema rules diverge enough
+// that a shared function would require per-provider conditional branching.
+// ─────────────────────────────────────────────────────────────────────────────
 // Rules from docs:
 //   • type must be plain uppercase: OBJECT, STRING, ARRAY, NUMBER, INTEGER, BOOLEAN
 //   • properties + required only allowed on OBJECT
@@ -2287,77 +2301,6 @@ function convertToolsToGemini(tools: any[]) {
   }
   return declarations;
 }
-function buildAnthropicToolsCompact() {
-  return toolDefinitions.flatMap(entry =>
-    Object.entries(entry as Record<string, any>).map(([rawName, def]) => {
-      const props: Record<string, any> = {};
-      for (const [k, v] of Object.entries((def.parameters?.properties || {}) as Record<string, any>)) {
-        const t = String(v.type || "string").replace(/^[Tt]ype\./, "").toLowerCase();
-        props[k] = { type: t, description: String(v.description || "") };
-        if (v.enum) props[k].enum = v.enum;
-        if (v.items) props[k].items = { type: String(v.items.type || "string").replace(/^[Tt]ype\./, "").toLowerCase() };
-      }
-      return {
-        name: rawName,
-        description: String(def.description || ""),
-        input_schema: {
-          type: "object",
-          properties: props,
-          required: def.parameters?.required || [],
-        },
-      };
-    })
-  );
-}
-
-function buildAnthropicMsgs(messages: ChatMsg[]) {
-  const result: any[] = [];
-  for (const msg of messages) {
-    if (msg.role === "system") continue;
-    if (msg.role === "user") {
-      result.push({ role: "user", content: msg.content || "" });
-    } else if (msg.role === "assistant") {
-      const parts: any[] = [];
-      if (msg.content) parts.push({ type: "text", text: msg.content });
-      if (msg.tool_calls?.length) {
-        for (const tc of msg.tool_calls) {
-          let inp: any = {};
-          try { inp = JSON.parse(tc.function.arguments); } catch { }
-          parts.push({ type: "tool_use", id: tc.id, name: tc.function.name, input: inp });
-        }
-      }
-      if (parts.length) result.push({ role: "assistant", content: parts });
-    } else if (msg.role === "tool") {
-      let c: any = msg.content;
-      try { c = JSON.parse(msg.content); } catch { }
-      const block = {
-        type: "tool_result",
-        tool_use_id: msg.tool_call_id || msg.name || "call_0",
-        content: typeof c === "string" ? c : JSON.stringify(c),
-      };
-      const last = result[result.length - 1];
-      if (last?.role === "user" && Array.isArray(last.content)) {
-        last.content.push(block);
-      } else {
-        result.push({ role: "user", content: [block] });
-      }
-    }
-  }
-  // Ensure alternation
-  const merged: any[] = [];
-  for (const m of result) {
-    const prev = merged[merged.length - 1];
-    if (prev?.role === m.role) {
-      const pc = Array.isArray(prev.content) ? prev.content : [{ type: "text", text: prev.content }];
-      const mc = Array.isArray(m.content) ? m.content : [{ type: "text", text: m.content }];
-      prev.content = [...pc, ...mc];
-    } else {
-      merged.push({ ...m });
-    }
-  }
-  return merged;
-}
-
 // ── Batch API (non-streaming, for background tasks) ───────────────────────────
 
 export async function batchChat(userMessage: string, systemOverride?: string): Promise<string> {
@@ -2373,7 +2316,7 @@ export async function batchChat(userMessage: string, systemOverride?: string): P
       "x-anthropic-priority": "batch",
     },
     body: JSON.stringify({
-      model: "anthropic/claude-haiku-4-5",  // cheaper model for batch
+      model: MODEL_CLAUDE_HAIKU,  // cheaper model for batch
       max_tokens: 4096,
       messages: [
         { role: "system", content: systemOverride || SYSTEM_PROMPT },
@@ -2494,7 +2437,7 @@ async function streamChatClaude({
       "anthropic-beta": "prompt-caching-2024-07-31",
     },
     body: JSON.stringify({
-      model: "claude-sonnet-4-6",
+      model: MODEL_CLAUDE_SONNET,
       max_tokens: 8000,
       stream: true,
       system: systemWithCache,
@@ -2567,7 +2510,7 @@ export async function batchClaude(
   const batchReqs = requests.map(r => ({
     custom_id: r.id,
     params: {
-      model: "claude-sonnet-4-6",
+      model: MODEL_CLAUDE_SONNET,
       max_tokens: 4096,
       system: [{ type: "text", text: system, cache_control: { type: "ephemeral" } }],
       messages: [{ role: "user", content: r.userMessage }],
@@ -2780,7 +2723,7 @@ async function streamChatGemini({
 }) {
   try {
     const sandboxId = localStorage.getItem("sandboxId");
-    const activeModel = localStorage.getItem("activeModel") || "gemini-3.1-pro-preview";
+    const activeModel = localStorage.getItem("activeModel") || MODEL_GEMINI_DEFAULT;
 
     const response = await fetch("/api/ai/chat", {
       method: "POST",
@@ -2807,6 +2750,8 @@ async function streamChatGemini({
     const decoder = new TextDecoder();
     let buffer = "";
     let toolCallIndex = 0;
+    // Accumulate streaming tool input deltas (tool-input-start / tool-input-delta)
+    const pendingToolInput: Record<string, { name: string; args: string }> = {};
 
     while (true) {
       const { done, value } = await reader.read();
@@ -2818,31 +2763,51 @@ async function streamChatGemini({
 
       for (const line of lines) {
         if (!line.startsWith("data: ")) continue;
-        if (line.trim() === "data: [DONE]") continue;
-        const jsonStr = line.slice(6).trim();
-        if (!jsonStr) continue;
+        const raw = line.slice(6).trim();
+        if (!raw || raw === "[DONE]") continue;
 
-        try {
-          const part = JSON.parse(jsonStr);
+        let part: any;
+        try { part = JSON.parse(raw); } catch { continue; }
 
-          // Handle Vercel AI SDK 6.0 Stream Parts
-          if (part.type === "text-delta") {
-            onDelta(part.text);
-          } else if (part.type === "tool-call") {
+        switch (part.type) {
+          case "text-delta":
+            // v6 UI stream: field is `delta`, not `text`
+            onDelta(part.delta ?? "");
+            break;
+          case "tool-input-start":
+            pendingToolInput[part.toolCallId] = { name: part.toolName, args: "" };
+            break;
+          case "tool-input-delta":
+            if (pendingToolInput[part.toolCallId]) {
+              pendingToolInput[part.toolCallId].args += part.inputTextDelta ?? "";
+            }
+            break;
+          case "tool-input-available": {
+            // Complete tool call with full input object
+            const tc = part;
             onToolCallDelta([{
               index: toolCallIndex++,
-              id: part.toolCallId,
-              function: {
-                name: part.toolName,
-                arguments: JSON.stringify(part.args || {})
-              }
+              id: tc.toolCallId,
+              function: { name: tc.toolName, arguments: JSON.stringify(tc.input ?? {}) }
             }]);
-          } else if (part.type === "finish") {
-            // End of stream handled by loop break
+            delete pendingToolInput[tc.toolCallId];
+            break;
           }
-        } catch (e) {
-          console.warn("Failed to parse stream part", e);
+          case "error":
+            throw new Error(part.errorText || "Stream error");
+          // start, text-start, text-end, finish-step, finish, start-step — no-op
         }
+      }
+    }
+
+    // Flush any tool calls that only got streaming deltas but no tool-input-available
+    for (const [id, tc] of Object.entries(pendingToolInput)) {
+      if (tc.args) {
+        onToolCallDelta([{
+          index: toolCallIndex++,
+          id,
+          function: { name: tc.name, arguments: tc.args }
+        }]);
       }
     }
 

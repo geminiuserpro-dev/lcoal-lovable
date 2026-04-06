@@ -1,15 +1,13 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { ArrowUp, Plus, Sparkles, Loader2, Paperclip, Mic, MicOff, Zap, Bot, StopCircle, Trash2, MessageSquare, Hash } from "lucide-react";
-import { ChatMessage, ToolCall } from "@/lib/tools";
-import { streamChat, accumulateToolCalls, toToolCalls, ChatMsg, StreamToolCall, getActiveProvider, resetSessionChain } from "@/lib/ai-chat";
-import { CreditsService } from "@/services/CreditsService";
+import { ArrowUp, Sparkles, Loader2, Paperclip, Mic, MicOff, Bot, StopCircle, Trash2 } from "lucide-react";
 import { useSandbox } from "@/contexts/SandboxContext";
+import { resetSessionChain } from "@/lib/ai-chat";
+import { useSpeechRecognition } from "@/hooks/useSpeechRecognition";
+import { useChatManager } from "@/hooks/useChatManager";
 import ChatMessageBubble from "./ChatMessageBubble";
 import { TaskTrackingPanel } from "./TaskTrackingPanel";
 import { toast } from "sonner";
 import { motion, AnimatePresence } from "motion/react";
-
-const MAX_TOOL_LOOPS = 20;
 
 const SUGGESTED_PROMPTS = [
   "Build a beautiful landing page",
@@ -19,52 +17,26 @@ const SUGGESTED_PROMPTS = [
 ];
 
 const ChatPanel = () => {
-  const {
-    status: sandboxStatus,
-    executeToolCall,
-    messages,
-    setMessages,
-    chatHistory,
-    setChatHistory
-  } = useSandbox();
+  const { status: sandboxStatus, messages, setMessages, setChatHistory } = useSandbox();
 
   const [input, setInput] = useState("");
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [isListening, setIsListening] = useState(false);
   const [showSuggestions, setShowSuggestions] = useState(true);
-  const [selectedModel, setSelectedModel] = useState<'gemini' | 'claude'>('gemini');
-  const [activeProvider, setActiveProvider] = useState<'gemini' | 'claude'>('gemini');
+  const [attachedImages, setAttachedImages] = useState<string[]>([]);
+  const [activeModel, setActiveModel] = useState<string>(
+    () => localStorage.getItem("activeModel") || "google/gemini-3-flash"
+  );
+
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const recognitionRef = useRef<any>(null);
-  const abortRef = useRef<boolean>(false);
-  const [attachedImages, setAttachedImages] = useState<string[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const startListening = useCallback(() => {
-    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SpeechRecognition) { toast.error("Speech recognition not supported."); return; }
-    if (!recognitionRef.current) {
-      recognitionRef.current = new SpeechRecognition();
-      recognitionRef.current.continuous = false;
-      recognitionRef.current.interimResults = false;
-      recognitionRef.current.lang = "en-US";
-      recognitionRef.current.onresult = (event: any) => {
-        setInput((prev) => (prev ? `${prev} ${event.results[0][0].transcript}` : event.results[0][0].transcript));
-        setIsListening(false);
-      };
-      recognitionRef.current.onerror = () => setIsListening(false);
-      recognitionRef.current.onend = () => setIsListening(false);
-    }
-    try { recognitionRef.current.start(); setIsListening(true); } catch { setIsListening(false); }
-  }, []);
+  const { isListening, startListening, stopListening } = useSpeechRecognition(
+    (transcript) => setInput((prev) => prev ? `${prev} ${transcript}` : transcript)
+  );
 
-  const stopListening = useCallback(() => {
-    if (recognitionRef.current) { recognitionRef.current.stop(); setIsListening(false); }
-  }, []);
+  const { isProcessing, handleSend: sendMessage, handleStop } = useChatManager();
 
   useEffect(() => { if (messages.length > 0) setShowSuggestions(false); }, [messages.length]);
-
   useEffect(() => { scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" }); }, [messages]);
   useEffect(() => {
     if (textareaRef.current) {
@@ -73,43 +45,23 @@ const ChatPanel = () => {
     }
   }, [input]);
 
-  const runToolCalls = useCallback(async (
-    assistantId: string,
-    accumulated: Map<number, { id: string; name: string; arguments: string; thoughtSignature?: string }>
-  ): Promise<{ id: string; name: string; result: string; thoughtSignature?: string }[]> => {
-    const toolCalls = Array.from(accumulated.values());
-    const results: { id: string; name: string; result: string; thoughtSignature?: string }[] = [];
-    for (const tc of toolCalls) {
-      let args: Record<string, any> = {};
-      try { args = JSON.parse(tc.arguments); } catch { args = { _raw: tc.arguments }; }
-      const uiToolCall: ToolCall = { id: tc.id, name: tc.name, arguments: args, status: "running", thoughtSignature: tc.thoughtSignature };
-      setMessages((prev) => prev.map((m) => m.id === assistantId ? { ...m, toolCalls: (m.toolCalls || []).map((t) => t.id === tc.id ? uiToolCall : t) } : m));
-      const startTime = Date.now();
-      const result = await executeToolCall(uiToolCall);
-      const duration = Date.now() - startTime;
-      setMessages((prev) => prev.map((m) => m.id === assistantId
-        ? { ...m, toolCalls: (m.toolCalls || []).map((t) => t.id === tc.id ? { ...t, status: result.success ? ("completed" as const) : ("error" as const), result: result.result, duration } : t) }
-        : m
-      ));
-      results.push({ id: tc.id, name: tc.name, result: result.result, thoughtSignature: tc.thoughtSignature });
-    }
-    return results;
-  }, [executeToolCall, setMessages]);
-
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
     if (!files.length) return;
     files.forEach(file => {
       const reader = new FileReader();
       reader.onloadend = () => {
+        const result = reader.result;
+        if (typeof result !== "string") return;
         setAttachedImages(prev => {
           if (prev.length >= 3) {
             toast.warning("Maximum of 3 images allowed.", { id: "img" });
             return prev;
           }
-          return [...prev, reader.result as string];
+          return [...prev, result];
         });
       };
+      reader.onerror = () => toast.error("Failed to read image file.");
       reader.readAsDataURL(file);
     });
     if (fileInputRef.current) fileInputRef.current.value = "";
@@ -119,94 +71,13 @@ const ChatPanel = () => {
 
   const handleSend = async (text?: string) => {
     const msgText = (text || input).trim();
-    if ((!msgText && attachedImages.length === 0) || isProcessing) return;
-    abortRef.current = false;
-    setIsProcessing(true);
+    if (!msgText && attachedImages.length === 0) return;
     setShowSuggestions(false);
     const sentImages = attachedImages.length > 0 ? [...attachedImages] : undefined;
     setAttachedImages([]);
-    const userMsg: ChatMessage = { id: crypto.randomUUID(), role: "user", content: msgText, images: sentImages, timestamp: new Date() };
-    setMessages((prev) => [...prev, userMsg]);
     setInput("");
-    let currentHistory = [...chatHistory, { role: "user" as const, content: msgText, images: sentImages }];
-    setChatHistory(currentHistory);
-    try {
-      // Check + deduct credit for this message
-      const { allowed, reason } = await CreditsService.canUseCredits();
-      if (!allowed) {
-        toast.error(reason || "No credits remaining. Please upgrade your plan.");
-        setIsProcessing(false);
-        return;
-      }
-      await CreditsService.deductCredit();
-
-      let loopCount = 0;
-      while (loopCount < MAX_TOOL_LOOPS) {
-        if (abortRef.current) break;
-        loopCount++;
-        const assistantId = crypto.randomUUID();
-        setMessages((prev) => [...prev, { id: assistantId, role: "assistant", content: "", toolCalls: [], timestamp: new Date() }]);
-        let assistantContent = "";
-        const accumulated = new Map<number, { id: string; name: string; arguments: string; thoughtSignature?: string }>();
-        let resolvedThoughtSignature: string | undefined = undefined;
-        let hadError = false;
-        await streamChat({
-          messages: currentHistory,
-          model: selectedModel,
-          onDelta: (chunk) => {
-            assistantContent += chunk;
-            setMessages((prev) => prev.map((m) => m.id === assistantId ? { ...m, content: assistantContent } : m));
-          },
-          onToolCallDelta: (deltas: StreamToolCall[]) => {
-            accumulateToolCalls(accumulated, deltas);
-            const toolCalls = toToolCalls(accumulated, "running");
-            setMessages((prev) => prev.map((m) => m.id === assistantId ? { ...m, toolCalls } : m));
-          },
-          onDone: (_finishReason, thoughtSignature) => { resolvedThoughtSignature = thoughtSignature; setActiveProvider(getActiveProvider()); },
-          onError: (err) => {
-            hadError = true;
-            toast.error(err);
-            setMessages((prev) => prev.map((m) => m.id === assistantId ? { ...m, content: `⚠️ ${err}` } : m));
-          },
-        });
-        if (hadError || abortRef.current) break;
-        const content = assistantContent;
-        const thoughtSignature = resolvedThoughtSignature;
-        if (accumulated.size > 0) {
-          const toolCallsForHistory = Array.from(accumulated.values()).map((tc) => ({
-            id: tc.id, type: "function" as const,
-            function: { name: tc.name, arguments: tc.arguments },
-            thoughtSignature: tc.thoughtSignature,
-          }));
-          const assistantHistoryMsg: ChatMsg = { role: "assistant", content: content || "", thoughtSignature, tool_calls: toolCallsForHistory };
-          currentHistory = [...currentHistory, assistantHistoryMsg];
-          setChatHistory(currentHistory);
-          const results = await runToolCalls(assistantId, accumulated);
-          for (const r of results) {
-            currentHistory = [...currentHistory, { role: "tool", content: r.result, tool_call_id: r.id, name: r.name, thoughtSignature: r.thoughtSignature }];
-            setChatHistory(currentHistory);
-          }
-          continue;
-        }
-        if (content) { currentHistory = [...currentHistory, { role: "assistant", content, thoughtSignature }]; setChatHistory(currentHistory); }
-        break;
-      }
-      if (loopCount >= MAX_TOOL_LOOPS) toast.warning("Reached maximum tool call iterations");
-    } catch (e) {
-      console.error("Chat error:", e);
-      toast.error("Failed to get AI response");
-    } finally {
-      setIsProcessing(false);
-      abortRef.current = false;
-    }
+    await sendMessage(msgText, sentImages);
   };
-
-  const handleStop = useCallback(() => { abortRef.current = true; setIsProcessing(false); }, []);
-
-  useEffect(() => {
-    window.addEventListener("ai-stop-generation", handleStop);
-    return () => window.removeEventListener("ai-stop-generation", handleStop);
-  }, [handleStop]);
 
   const handleClearChat = useCallback(() => {
     if (!confirm("Clear all messages? This cannot be undone.")) return;
@@ -239,21 +110,24 @@ const ChatPanel = () => {
             )}
           </div>
 
-          {/* Model name + status */}
+          {/* Model selector + status */}
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2">
-              <button
-                onClick={() => { setSelectedModel(m => m === 'gemini' ? 'claude' : 'gemini'); resetSessionChain(); }}
-                className="text-sm font-semibold text-foreground flex items-center gap-1.5 hover:text-primary transition-colors"
+              <select
+                value={activeModel}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  localStorage.setItem("activeModel", val);
+                  setActiveModel(val);
+                  resetSessionChain();
+                }}
+                className="text-sm font-semibold text-foreground bg-transparent border-none outline-none cursor-pointer hover:text-primary transition-colors"
                 title="Switch model">
-                {selectedModel === 'gemini' ? (
-                  <><span className="text-blue-500">✦</span> Gemini 3 Flash</>
-                ) : (
-                  <><span className="text-orange-400">◆</span> Claude Sonnet 4.6</>
-                )}
-                {activeProvider !== selectedModel && <span className="text-yellow-500 text-xs" title="Fallback active">⚡</span>}
-                <span className="text-muted-foreground/40 text-xs">↕</span>
-              </button>
+                <option value="google/gemini-3-flash">✦ Gemini 2.0 Flash</option>
+                <option value="google/gemini-3.-pro">✦ Gemini 2.5 Pro</option>
+                <option value="anthropic/claude-sonnet-4-5">◆ Claude Sonnet 4.5</option>
+                <option value="openai/gpt-4o">⬡ GPT-4o</option>
+              </select>
             </div>
             <div className="text-[11px] text-muted-foreground/60">
               {sandboxStatus === "creating" ? "Setting up sandbox..." : sandboxStatus === "ready" ? "Ready to Build" : sandboxStatus === "error" ? "Connection error" : "Initializing..."}

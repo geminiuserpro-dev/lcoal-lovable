@@ -203,7 +203,7 @@ export const SandboxProvider = ({ children }: { children: React.ReactNode }) => 
         let isReady = false;
         let attempts = 0;
         const maxAttempts = 25; // ~50 seconds max
-        
+
         while (!isReady && attempts < maxAttempts) {
           attempts++;
           try {
@@ -451,7 +451,7 @@ export const SandboxProvider = ({ children }: { children: React.ReactNode }) => 
     setStatus("creating");
     try {
       const sid = await ensureSandbox();
-      
+
       // 1. First Read Files (Instantly populate UI)
       console.log("Reading files from sandbox...");
       await loadFilesFromSandbox(sid, "/home/daytona/repo");
@@ -460,7 +460,7 @@ export const SandboxProvider = ({ children }: { children: React.ReactNode }) => 
       // 2. Then Preview URL (Start dev server in background on port 3000)
       console.log("Starting dev server on port 3000...");
       startPreview().catch(e => console.warn("Background preview start failed:", e));
-      
+
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Initialization failed";
       setError(msg);
@@ -1103,7 +1103,7 @@ export const SandboxProvider = ({ children }: { children: React.ReactNode }) => 
               const { GoogleGenAI } = await import("@google/genai");
               const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
               const response = await ai.models.generateContent({
-                model: "gemini-2.5-flash",
+                model: "gemini-3-flash",
                 contents: [{
                   role: "user",
                   parts: [
@@ -1329,7 +1329,7 @@ export const SandboxProvider = ({ children }: { children: React.ReactNode }) => 
             if (!task) return { result: `Task ${args.task_id} not found`, success: false };
             task.status = args.status;
             window.dispatchEvent(new CustomEvent("ai-task-update", { detail: (window as any).__tasks }));
-            try { sessionStorage.setItem("__tasks", JSON.stringify((window as any).__tasks)); } catch {}
+            try { sessionStorage.setItem("__tasks", JSON.stringify((window as any).__tasks)); } catch { }
             return { result: JSON.stringify(task), success: true };
           }
           case "task_tracking__get_task_list": {
@@ -1359,7 +1359,7 @@ ${JSON.stringify(taskList, null, 2)}`, success: true
             if (!task) return { result: `Task ${args.task_id} not found`, success: false };
             task.title = args.new_title;
             window.dispatchEvent(new CustomEvent("ai-task-update", { detail: (window as any).__tasks }));
-            try { sessionStorage.setItem("__tasks", JSON.stringify((window as any).__tasks)); } catch {}
+            try { sessionStorage.setItem("__tasks", JSON.stringify((window as any).__tasks)); } catch { }
             return { result: JSON.stringify(task), success: true };
           }
           case "task_tracking__update_task_description": {
@@ -1368,7 +1368,7 @@ ${JSON.stringify(taskList, null, 2)}`, success: true
             if (!task) return { result: `Task ${args.task_id} not found`, success: false };
             task.description = args.new_description;
             window.dispatchEvent(new CustomEvent("ai-task-update", { detail: (window as any).__tasks }));
-            try { sessionStorage.setItem("__tasks", JSON.stringify((window as any).__tasks)); } catch {}
+            try { sessionStorage.setItem("__tasks", JSON.stringify((window as any).__tasks)); } catch { }
             return { result: JSON.stringify(task), success: true };
           }
           case "task_tracking__add_task_note": {
@@ -1378,7 +1378,7 @@ ${JSON.stringify(taskList, null, 2)}`, success: true
             task.notes = task.notes || [];
             task.notes.push(args.note);
             window.dispatchEvent(new CustomEvent("ai-task-update", { detail: (window as any).__tasks }));
-            try { sessionStorage.setItem("__tasks", JSON.stringify((window as any).__tasks)); } catch {}
+            try { sessionStorage.setItem("__tasks", JSON.stringify((window as any).__tasks)); } catch { }
             return { result: JSON.stringify(task), success: true };
           }
 
@@ -2183,7 +2183,7 @@ Created src/lib/ai-gateway.ts with a callAI() helper.
 
 Available models:
 - anthropic/claude-sonnet-4-6 (default)
-- google/gemini-2.5-flash
+- google/gemini-3-flash
 - openai/gpt-4o
 
 Usage:
