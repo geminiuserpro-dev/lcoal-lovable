@@ -911,6 +911,37 @@ export interface StreamToolCall {
 
 export const toolDefinitions = [
   {
+    "writeFile": {
+      "description": "Write content to a file in the sandbox.",
+      "parameters": {
+        "type": "Type.OBJECT",
+        "required": ["filePath", "content"],
+        "properties": {
+          "filePath": { "type": "Type.STRING" },
+          "content": { "type": "Type.STRING" }
+        }
+      }
+    },
+    "readFile": {
+      "description": "Read content from a file in the sandbox.",
+      "parameters": {
+        "type": "Type.OBJECT",
+        "required": ["filePath"],
+        "properties": {
+          "filePath": { "type": "Type.STRING" }
+        }
+      }
+    },
+    "executeCommand": {
+      "description": "Execute a shell command in the sandbox.",
+      "parameters": {
+        "type": "Type.OBJECT",
+        "required": ["command"],
+        "properties": {
+          "command": { "type": "Type.STRING" }
+        }
+      }
+    },
     "code--write": {
       "description": "Write/create file (overwrites). Prefer code--line_replace for most edits. In this mode, preserve large unchanged sections with the exact '// ... keep existing code' comment and only write changed sections. Create multiple files in parallel.",
       "parameters": {
@@ -2722,105 +2753,99 @@ async function streamChatGemini({
   onError: (err: string) => void;
 }) {
   try {
-    const sandboxId = localStorage.getItem("sandboxId");
-    const activeModel = localStorage.getItem("activeModel") || MODEL_GEMINI_DEFAULT;
+    const rawFormattedMessages: any[] = [];
+    for (const msg of messages) {
+      if (msg.role === "system") continue;
+      const role = msg.role === "assistant" ? "model" : "user";
+      const parts: any[] = [];
 
-    const response = await fetch("/api/ai/chat", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
+      if (msg.role === "user") {
+        if (msg.content) parts.push({ text: msg.content });
+        if (msg.images) {
+          for (const imgUrl of msg.images) {
+            const match = imgUrl.match(/^data:(image\/[a-zA-Z]+);base64,(.+)$/);
+            if (match) parts.push({ inlineData: { mimeType: match[1], data: match[2] } });
+          }
+        }
+      } else if (msg.role === "assistant") {
+        if (msg.content) parts.push({ text: msg.content });
+        if (msg.tool_calls) {
+          for (const tc of msg.tool_calls) {
+            let args: Record<string, any> = {};
+            try { args = JSON.parse(tc.function.arguments); } catch { args = {}; }
+            parts.push({ functionCall: { name: sanitizeToolName(tc.function.name), args } });
+          }
+        }
+      } else if (msg.role === "tool") {
+        let toolResult: any = msg.content;
+        try { toolResult = JSON.parse(msg.content); } catch { toolResult = { result: msg.content || "Success" }; }
+        parts.push({ functionResponse: { name: sanitizeToolName(msg.name || "unknown"), response: toolResult } });
+      }
+
+      if (parts.length > 0) {
+        const last = rawFormattedMessages[rawFormattedMessages.length - 1];
+        if (last && last.role === role) last.parts.push(...parts);
+        else rawFormattedMessages.push({ role, parts });
+      }
+    }
+
+    const activeModel = localStorage.getItem("activeModel") || MODEL_GEMINI_DEFAULT;
+    const tools = [{ functionDeclarations: convertToolsToGemini(toolDefinitions) }];
+
+    const response = await fetch("/api/ai/gemini", {
+      method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        messages,
-        modelId: activeModel,
-        sandboxId
+        model: activeModel,
+        contents: rawFormattedMessages,
+        tools,
+        systemInstruction: { role: "system", parts: [{ text: SYSTEM_PROMPT }] }
       })
     });
 
-    if (!response.ok) {
-      let errorText = response.statusText;
-      try {
-        const errJson = await response.json();
-        if (errJson.error) errorText = errJson.error;
-      } catch { }
-      throw new Error(`API Error: ${errorText}`);
-    }
-
+    if (!response.ok) throw new Error(`API Error: ${response.statusText}`);
     const reader = response.body?.getReader();
     if (!reader) throw new Error("No reader available");
 
     const decoder = new TextDecoder();
     let buffer = "";
     let toolCallIndex = 0;
-    // Accumulate streaming tool input deltas (tool-input-start / tool-input-delta)
-    const pendingToolInput: Record<string, { name: string; args: string }> = {};
+    const pendingToolInput: Record<string, { id: string; name: string; args: string }> = {};
 
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split("\n");
       buffer = lines.pop() || "";
 
       for (const line of lines) {
         if (!line.startsWith("data: ")) continue;
-        const raw = line.slice(6).trim();
-        if (!raw || raw === "[DONE]") continue;
+        const msgStr = line.slice(6).trim();
+        if (!msgStr) continue;
 
         let part: any;
-        try { part = JSON.parse(raw); } catch { continue; }
+        try { part = JSON.parse(msgStr); } catch { continue; }
 
-        switch (part.type) {
-          case "text-delta":
-            // v6 UI stream: field is `delta`, not `text`
-            onDelta(part.delta ?? "");
-            break;
-          case "tool-input-start":
-            pendingToolInput[part.toolCallId] = { name: part.toolName, args: "" };
-            break;
-          case "tool-input-delta":
-            if (pendingToolInput[part.toolCallId]) {
-              pendingToolInput[part.toolCallId].args += part.inputTextDelta ?? "";
+        if (part.candidates?.[0]?.content?.parts) {
+          for (const item of part.candidates[0].content.parts) {
+            if (item.text) onDelta(item.text);
+            if (item.functionCall) {
+              const tcId = `call_${Math.random().toString(36).substring(7)}`;
+              onToolCallDelta([{
+                index: toolCallIndex++,
+                id: tcId,
+                function: { name: desanitizeToolName(item.functionCall.name), arguments: JSON.stringify(item.functionCall.args || {}) }
+              }]);
             }
-            break;
-          case "tool-input-available": {
-            // Complete tool call with full input object
-            const tc = part;
-            onToolCallDelta([{
-              index: toolCallIndex++,
-              id: tc.toolCallId,
-              function: { name: tc.toolName, arguments: JSON.stringify(tc.input ?? {}) }
-            }]);
-            delete pendingToolInput[tc.toolCallId];
-            break;
           }
-          case "error":
-            throw new Error(part.errorText || "Stream error");
-          // start, text-start, text-end, finish-step, finish, start-step — no-op
         }
-      }
-    }
-
-    // Flush any tool calls that only got streaming deltas but no tool-input-available
-    for (const [id, tc] of Object.entries(pendingToolInput)) {
-      if (tc.args) {
-        onToolCallDelta([{
-          index: toolCallIndex++,
-          id,
-          function: { name: tc.name, arguments: tc.args }
-        }]);
       }
     }
 
     onDone("completed");
   } catch (error: any) {
     console.error("Chat error:", error);
-    let errorMessage = error.message || "An error occurred during chat";
-
-    if (errorMessage.includes("429") || errorMessage.includes("RESOURCE_EXHAUSTED") || errorMessage.includes("quota")) {
-      errorMessage = "You have exceeded your Gemini API quota. Please check your plan and billing details, or try again later.";
-    }
-
-    onError(errorMessage);
+    onError(error.message || "An error occurred");
   }
 }
 

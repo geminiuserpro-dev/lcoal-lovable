@@ -355,13 +355,28 @@ app.post("/api/daytona", async (req, res) => {
 // ── AI Proxy Handlers ────────────────────────────────────────────────────────
 app.post("/api/ai/gemini", async (req, res) => {
   try {
-    const key = process.env.GEMINI_API_KEY;
-    const { model, contents, generationConfig, system_instruction } = req.body;
-    const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model || "gemini-3-flash"}:generateContent?key=${key}`, {
+    const key = process.env.AI_GATEWAY_API_KEY || process.env.GEMINI_API_KEY;
+    const { model, contents, tools, systemInstruction } = req.body;
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model || "gemini-2.5-pro"}:streamGenerateContent?alt=sse&key=${key}`;
+    const payload: any = { contents };
+    if (tools) payload.tools = tools;
+    if (systemInstruction) payload.systemInstruction = systemInstruction;
+
+    const resp = await fetch(url, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ contents, generationConfig, system_instruction })
+      body: JSON.stringify(payload)
     });
-    res.status(resp.status).json(await resp.json());
+    
+    if (req.body.stream !== false) {
+      res.setHeader("Content-Type", "text/event-stream");
+      const reader = resp.body?.getReader();
+      while (reader) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        res.write(value);
+      }
+      res.end();
+    } else { res.status(resp.status).json(await resp.json()); }
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
