@@ -18,8 +18,8 @@ import {
   deleteAllSandboxes,
   setupWatcher
 } from "@/lib/daytona";
+import type { UIMessage } from "ai";
 import { ChatMessage, ToolCall } from "@/lib/tools";
-import { ChatMsg } from "@/lib/ai-chat";
 import { SandboxFile, TreeNode } from "../types";
 import { useStore } from "../store/store";
 import { useFirebase } from "../components/FirebaseProvider";
@@ -53,8 +53,8 @@ interface SandboxContextType {
   setView: (view: 'code' | 'preview' | 'security') => void;
   messages: ChatMessage[];
   setMessages: (messages: ChatMessage[] | ((prev: ChatMessage[]) => ChatMessage[])) => void;
-  chatHistory: ChatMsg[];
-  setChatHistory: (history: ChatMsg[] | ((prev: ChatMsg[]) => ChatMsg[])) => void;
+  chatHistory: UIMessage[];
+  setChatHistory: (history: UIMessage[] | ((prev: UIMessage[]) => UIMessage[])) => void;
   ensureSandbox: () => Promise<string>;
   startPreview: () => Promise<string>;
   initializeSandbox: () => Promise<void>;

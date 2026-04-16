@@ -1,12 +1,13 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { ArrowUp, Sparkles, Loader2, Paperclip, Mic, MicOff, Bot, StopCircle, Trash2 } from "lucide-react";
 import { useSandbox } from "@/contexts/SandboxContext";
-import { resetSessionChain } from "@/lib/ai-chat";
 import { useSpeechRecognition } from "@/hooks/useSpeechRecognition";
 import { useChatManager } from "@/hooks/useChatManager";
 import ChatMessageBubble from "./ChatMessageBubble";
 import { TaskTrackingPanel } from "./TaskTrackingPanel";
 import { toast } from "sonner";
+
+// Note: If you get an import error here, change "motion/react" to "framer-motion"
 import { motion, AnimatePresence } from "motion/react";
 
 const SUGGESTED_PROMPTS = [
@@ -17,13 +18,15 @@ const SUGGESTED_PROMPTS = [
 ];
 
 const ChatPanel = () => {
-  const { status: sandboxStatus, messages, setMessages, setChatHistory } = useSandbox();
+  const { status: sandboxStatus, messages } = useSandbox();
 
   const [input, setInput] = useState("");
   const [showSuggestions, setShowSuggestions] = useState(true);
   const [attachedImages, setAttachedImages] = useState<string[]>([]);
+
+  // FIXED: Default to a clean, valid model ID
   const [activeModel, setActiveModel] = useState<string>(
-    () => localStorage.getItem("activeModel") || "google/gemini-3-flash"
+    () => localStorage.getItem("activeModel") || "gemini-2.0-flash"
   );
 
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -34,10 +37,16 @@ const ChatPanel = () => {
     (transcript) => setInput((prev) => prev ? `${prev} ${transcript}` : transcript)
   );
 
-  const { isProcessing, handleSend: sendMessage, handleStop } = useChatManager();
+  const { isProcessing, handleSend: sendMessage, handleStop, clearChat } = useChatManager();
 
-  useEffect(() => { if (messages.length > 0) setShowSuggestions(false); }, [messages.length]);
-  useEffect(() => { scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" }); }, [messages]);
+  useEffect(() => {
+    if (messages.length > 0) setShowSuggestions(false);
+  }, [messages.length]);
+
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
+  }, [messages]);
+
   useEffect(() => {
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
@@ -72,28 +81,26 @@ const ChatPanel = () => {
   const handleSend = async (text?: string) => {
     const msgText = (text || input).trim();
     if (!msgText && attachedImages.length === 0) return;
+
     setShowSuggestions(false);
     const sentImages = attachedImages.length > 0 ? [...attachedImages] : undefined;
+
     setAttachedImages([]);
     setInput("");
+
     await sendMessage(msgText, sentImages);
   };
 
   const handleClearChat = useCallback(() => {
     if (!confirm("Clear all messages? This cannot be undone.")) return;
-    setMessages([{
-      id: crypto.randomUUID(),
-      role: "assistant" as const,
-      content: "Chat cleared. How can I help you build?",
-      timestamp: new Date(),
-    }]);
-    setChatHistory([]);
+    clearChat();
     setShowSuggestions(true);
-  }, [setMessages, setChatHistory]);
+  }, [clearChat]);
 
   const isEmpty = messages.length === 0;
   const msgCount = messages.filter(m => m.role === "user").length;
   const charCount = input.length;
+  const hasContent = input.trim().length > 0 || attachedImages.length > 0;
 
   return (
     <div className="flex flex-col h-full overflow-hidden" style={{ background: "hsl(var(--background))" }}>
@@ -119,14 +126,14 @@ const ChatPanel = () => {
                   const val = e.target.value;
                   localStorage.setItem("activeModel", val);
                   setActiveModel(val);
-                  resetSessionChain();
                 }}
                 className="text-sm font-semibold text-foreground bg-transparent border-none outline-none cursor-pointer hover:text-primary transition-colors"
                 title="Switch model">
-                <option value="google/gemini-3-flash">✦ Gemini 2.0 Flash</option>
-                <option value="google/gemini-3.-pro">✦ Gemini 2.5 Pro</option>
-                <option value="anthropic/claude-sonnet-4-5">◆ Claude Sonnet 4.5</option>
-                <option value="openai/gpt-4o">⬡ GPT-4o</option>
+                {/* FIXED: Mapped properly to match server.ts backend */}
+                <option value="gemini-2.0-flash">✦ Gemini 2.0 Flash</option>
+                <option value="google/gemini-2.5-pro">✦ Gemini 2.5 Pro</option>
+                <option value="claude-3-7-sonnet-20250219">◆ Claude 3.7 Sonnet</option>
+                <option value="anthropic/claude-haiku-4.5">◆ Claude 3.5 Haiku</option>
               </select>
             </div>
             <div className="text-[11px] text-muted-foreground/60">
@@ -195,20 +202,27 @@ const ChatPanel = () => {
         ) : (
           <div className="px-3 py-4 space-y-4">
             <AnimatePresence initial={false}>
-              {messages.map((msg) => <ChatMessageBubble key={msg.id} message={msg} onSuggestion={(text) => { setInput(text); setTimeout(() => textareaRef.current?.focus(), 50); }} />)}
+              {messages.map((msg: any) => <ChatMessageBubble key={msg.id} message={msg} onSuggestion={(text: string) => { setInput(text); setTimeout(() => textareaRef.current?.focus(), 50); }} />)}
             </AnimatePresence>
-            {isProcessing && messages[messages.length - 1]?.content === "" && (messages[messages.length - 1]?.toolCalls?.length ?? 0) === 0 && (
-              <motion.div initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} className="flex items-center gap-2.5 pl-11">
-                <div className="flex gap-1">
-                  {[0, 1, 2].map((i) => (
-                    <motion.span key={i} className="w-1.5 h-1.5 rounded-full" style={{ background: "hsl(var(--primary))" }}
-                      animate={{ scale: [1, 1.4, 1], opacity: [0.4, 1, 0.4] }}
-                      transition={{ duration: 1.2, repeat: Infinity, delay: i * 0.2 }} />
-                  ))}
-                </div>
-                <span className="text-[11px] text-muted-foreground/60">Thinking...</span>
-              </motion.div>
-            )}
+
+            {/* Added check for both toolCalls and tool_calls syntax depending on API response */}
+            {(() => {
+              const lastMessage = messages[messages.length - 1] as (typeof messages)[number] & { tool_calls?: unknown[] } | undefined;
+              return isProcessing &&
+                lastMessage?.content === "" &&
+                ((lastMessage?.toolCalls?.length || lastMessage?.tool_calls?.length) ?? 0) === 0;
+            })() && (
+                <motion.div initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} className="flex items-center gap-2.5 pl-11">
+                  <div className="flex gap-1">
+                    {[0, 1, 2].map((i) => (
+                      <motion.span key={i} className="w-1.5 h-1.5 rounded-full" style={{ background: "hsl(var(--primary))" }}
+                        animate={{ scale: [1, 1.4, 1], opacity: [0.4, 1, 0.4] }}
+                        transition={{ duration: 1.2, repeat: Infinity, delay: i * 0.2 }} />
+                    ))}
+                  </div>
+                  <span className="text-[11px] text-muted-foreground/60">Thinking...</span>
+                </motion.div>
+              )}
           </div>
         )}
       </div>
@@ -267,10 +281,10 @@ const ChatPanel = () => {
                 </motion.button>
               )}
               <motion.button whileHover={{ scale: 1.06 }} whileTap={{ scale: 0.94 }} onClick={() => handleSend()}
-                disabled={!input.trim() || isProcessing}
+                disabled={!hasContent || isProcessing}
                 className="w-8 h-8 rounded-xl flex items-center justify-center text-white disabled:opacity-25 disabled:cursor-not-allowed transition-all shadow-md"
-                style={{ background: input.trim() && !isProcessing ? "var(--gradient-primary)" : "hsl(var(--muted))" }}>
-                {isProcessing ? <Loader2 size={14} className="animate-spin text-muted-foreground" /> : <ArrowUp size={14} className={input.trim() ? "text-white" : "text-muted-foreground"} />}
+                style={{ background: hasContent && !isProcessing ? "var(--gradient-primary)" : "hsl(var(--muted))" }}>
+                {isProcessing ? <Loader2 size={14} className="animate-spin text-muted-foreground" /> : <ArrowUp size={14} className={hasContent ? "text-white" : "text-muted-foreground"} />}
               </motion.button>
             </div>
           </div>

@@ -6,7 +6,18 @@ export interface SandboxState {
 
 async function fetchWithRetry(url: string, options: RequestInit, retries = 5) {
   for (let i = 0; i < retries; i++) {
-    const resp = await fetch(url, options);
+    let resp: Response;
+    try {
+      resp = await fetch(url, options);
+    } catch (networkErr: any) {
+      // fetch() itself threw — network unreachable, ECONNREFUSED, DNS failure, etc.
+      if (i < retries - 1) {
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        continue;
+      }
+      throw new Error(`Network error: ${networkErr.message || String(networkErr)}`);
+    }
+
     const contentType = resp.headers.get("content-type");
     
     if (!resp.ok) {

@@ -1,8 +1,8 @@
 import { GoogleGenAI, Type } from "@google/genai";
 
 // ── Model name constants ──────────────────────────────────────────────────────
-const MODEL_CLAUDE_SONNET = "claude-sonnet-4-6";
-const MODEL_CLAUDE_HAIKU = "anthropic/claude-haiku-4-5";
+const MODEL_CLAUDE_SONNET = "anthropic/claude-sonnet-4.6";
+const MODEL_CLAUDE_HAIKU = "anthropic/claude-haiku-4.5";
 const MODEL_GEMINI_DEFAULT = "google/gemini-3-flash";
 
 const SYSTEM_PROMPT = `
@@ -911,37 +911,6 @@ export interface StreamToolCall {
 
 export const toolDefinitions = [
   {
-    "writeFile": {
-      "description": "Write content to a file in the sandbox.",
-      "parameters": {
-        "type": "Type.OBJECT",
-        "required": ["filePath", "content"],
-        "properties": {
-          "filePath": { "type": "Type.STRING" },
-          "content": { "type": "Type.STRING" }
-        }
-      }
-    },
-    "readFile": {
-      "description": "Read content from a file in the sandbox.",
-      "parameters": {
-        "type": "Type.OBJECT",
-        "required": ["filePath"],
-        "properties": {
-          "filePath": { "type": "Type.STRING" }
-        }
-      }
-    },
-    "executeCommand": {
-      "description": "Execute a shell command in the sandbox.",
-      "parameters": {
-        "type": "Type.OBJECT",
-        "required": ["command"],
-        "properties": {
-          "command": { "type": "Type.STRING" }
-        }
-      }
-    },
     "code--write": {
       "description": "Write/create file (overwrites). Prefer code--line_replace for most edits. In this mode, preserve large unchanged sections with the exact '// ... keep existing code' comment and only write changed sections. Create multiple files in parallel.",
       "parameters": {
@@ -2399,82 +2368,17 @@ async function streamChatClaude({
   onDone: (finishReason: string | null) => void;
   onError: (err: string) => void;
 }) {
-  const apiKey = process.env.AI_GATEWAY_API_KEY;
-  if (!apiKey || apiKey === "undefined") { onError("AI_GATEWAY_API_KEY is not set"); return; }
-
-  // Build Anthropic-native messages
-  const anthMessages: any[] = [];
-  for (const msg of messages) {
-    if (msg.role === "system") continue;
-    if (msg.role === "user") {
-      const parts: any[] = [];
-      if (msg.images) {
-        for (const imgUrl of msg.images) {
-          const match = imgUrl.match(/^data:(image\/[a-zA-Z]+);base64,(.+)$/);
-          if (match) parts.push({ type: "image", source: { type: "base64", media_type: match[1], data: match[2] } });
-        }
-      }
-      if (msg.content) parts.push({ type: "text", text: msg.content });
-      anthMessages.push({ role: "user", content: parts.length > 0 ? parts : msg.content || "" });
-    } else if (msg.role === "assistant") {
-      const parts: any[] = [];
-      if (msg.content) parts.push({ type: "text", text: msg.content });
-      if (msg.tool_calls?.length) for (const tc of msg.tool_calls) {
-        let inp: any = {};
-        try { inp = JSON.parse(tc.function.arguments); } catch { }
-        parts.push({ type: "tool_use", id: tc.id, name: tc.function.name, input: inp });
-      }
-      if (parts.length) anthMessages.push({ role: "assistant", content: parts });
-    } else if (msg.role === "tool") {
-      let c: any = msg.content;
-      try { c = JSON.parse(msg.content); } catch { }
-      const block = {
-        type: "tool_result", tool_use_id: msg.tool_call_id || msg.name || "call_0",
-        content: typeof c === "string" ? c : JSON.stringify(c)
-      };
-      const last = anthMessages[anthMessages.length - 1];
-      if (last?.role === "user" && Array.isArray(last.content)) last.content.push(block);
-      else anthMessages.push({ role: "user", content: [block] });
-    }
-  }
-
-  // Merge consecutive same-role messages
-  const merged: any[] = [];
-  for (const m of anthMessages) {
-    const last = merged[merged.length - 1];
-    if (last?.role === m.role) {
-      const lc = Array.isArray(last.content) ? last.content : [{ type: "text", text: last.content }];
-      const mc = Array.isArray(m.content) ? m.content : [{ type: "text", text: m.content }];
-      last.content = [...lc, ...mc];
-    } else { merged.push({ ...m }); }
-  }
-
-  const tools = buildAnthropicTools();
-
-  // ── Prompt caching — system prompt + tools are static, mark them cacheable ──
-  // First request creates the cache (small surcharge), subsequent requests
-  // read from cache at ~10% of normal input token cost.
-  const systemWithCache = [{ type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral" } }];
-  const toolsWithCache = tools.map((t, i) =>
-    i === tools.length - 1 ? { ...t, cache_control: { type: "ephemeral" } } : t
-  );
+  // Server handles: message formatting, tool injection, system prompt, prompt caching.
+  // This client just sends raw ChatMsg[] and reads the SSE stream back.
+  const selectedModel = localStorage.getItem("activeModel") || MODEL_CLAUDE_SONNET;
+  const activeModel = selectedModel.toLowerCase().includes("claude")
+    ? selectedModel
+    : MODEL_CLAUDE_SONNET;
 
   const resp = await fetch("/api/ai/anthropic", {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${apiKey}`,
-      "anthropic-version": "2023-06-01",
-      "anthropic-beta": "prompt-caching-2024-07-31",
-    },
-    body: JSON.stringify({
-      model: MODEL_CLAUDE_SONNET,
-      max_tokens: 8000,
-      stream: true,
-      system: systemWithCache,
-      tools: toolsWithCache,
-      messages: merged,
-    }),
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ messages, model: activeModel }),
   });
 
   if (!resp.ok) { onError(`Claude API error ${resp.status}: ${await resp.text()}`); return; }
@@ -2684,6 +2588,7 @@ export async function streamChat({
 }) {
   const chain = getSessionChain(model);
   let lastError = '';
+  let surfacedError = false;
 
   for (let attempt = 0; attempt < chain.length; attempt++) {
     const provider = chain[attempt];
@@ -2692,6 +2597,7 @@ export async function streamChat({
     try {
       await new Promise<void>((resolve, reject) => {
         const wrappedError = (err: string) => {
+          lastError = err;
           // Detect rate limit / quota / provider errors → try next in chain
           const isProviderError =
             err.includes('429') ||
@@ -2705,9 +2611,9 @@ export async function streamChat({
             err.includes('503');
 
           if (isProviderError && attempt < chain.length - 1) {
-            lastError = err;
             reject(new Error('__PROVIDER_ERROR__'));
           } else {
+            surfacedError = true;
             onError(err);
             resolve();
           }
@@ -2739,10 +2645,14 @@ export async function streamChat({
   }
 
   // All providers exhausted
-  onError(`All providers failed. Last error: ${lastError || 'unknown'}`);
+  if (!surfacedError) {
+    onError(`All providers failed. Last error: ${lastError || 'unknown'}`);
+  }
 }
 
-// ── Gemini path (extracted for load balancer) ─────────────────────────────────
+// ── Gemini path — thin proxy client ──────────────────────────────────────────
+// Message formatting, tool injection, and system prompt all happen server-side
+// in /api/ai/gemini. This function just sends raw ChatMsg[] and reads the SSE.
 async function streamChatGemini({
   messages, onDelta, onToolCallDelta, onDone, onError
 }: {
@@ -2753,63 +2663,25 @@ async function streamChatGemini({
   onError: (err: string) => void;
 }) {
   try {
-    const rawFormattedMessages: any[] = [];
-    for (const msg of messages) {
-      if (msg.role === "system") continue;
-      const role = msg.role === "assistant" ? "model" : "user";
-      const parts: any[] = [];
-
-      if (msg.role === "user") {
-        if (msg.content) parts.push({ text: msg.content });
-        if (msg.images) {
-          for (const imgUrl of msg.images) {
-            const match = imgUrl.match(/^data:(image\/[a-zA-Z]+);base64,(.+)$/);
-            if (match) parts.push({ inlineData: { mimeType: match[1], data: match[2] } });
-          }
-        }
-      } else if (msg.role === "assistant") {
-        if (msg.content) parts.push({ text: msg.content });
-        if (msg.tool_calls) {
-          for (const tc of msg.tool_calls) {
-            let args: Record<string, any> = {};
-            try { args = JSON.parse(tc.function.arguments); } catch { args = {}; }
-            parts.push({ functionCall: { name: sanitizeToolName(tc.function.name), args } });
-          }
-        }
-      } else if (msg.role === "tool") {
-        let toolResult: any = msg.content;
-        try { toolResult = JSON.parse(msg.content); } catch { toolResult = { result: msg.content || "Success" }; }
-        parts.push({ functionResponse: { name: sanitizeToolName(msg.name || "unknown"), response: toolResult } });
-      }
-
-      if (parts.length > 0) {
-        const last = rawFormattedMessages[rawFormattedMessages.length - 1];
-        if (last && last.role === role) last.parts.push(...parts);
-        else rawFormattedMessages.push({ role, parts });
-      }
-    }
-
-    const activeModel = localStorage.getItem("activeModel") || MODEL_GEMINI_DEFAULT;
-    const tools = [{ functionDeclarations: convertToolsToGemini(toolDefinitions) }];
+    const selectedModel = localStorage.getItem("activeModel") || MODEL_GEMINI_DEFAULT;
+    const activeModel = selectedModel.toLowerCase().includes("claude")
+      ? MODEL_GEMINI_DEFAULT
+      : selectedModel;
 
     const response = await fetch("/api/ai/gemini", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: activeModel,
-        contents: rawFormattedMessages,
-        tools,
-        systemInstruction: { role: "system", parts: [{ text: SYSTEM_PROMPT }] }
-      })
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      // Server handles: message formatting, tool injection, system prompt
+      body: JSON.stringify({ messages, model: activeModel }),
     });
 
-    if (!response.ok) throw new Error(`API Error: ${response.statusText}`);
+    if (!response.ok) throw new Error(`API Error: ${response.status} ${response.statusText}`);
     const reader = response.body?.getReader();
     if (!reader) throw new Error("No reader available");
 
     const decoder = new TextDecoder();
     let buffer = "";
     let toolCallIndex = 0;
-    const pendingToolInput: Record<string, { id: string; name: string; args: string }> = {};
 
     while (true) {
       const { done, value } = await reader.read();
@@ -2822,10 +2694,8 @@ async function streamChatGemini({
         if (!line.startsWith("data: ")) continue;
         const msgStr = line.slice(6).trim();
         if (!msgStr) continue;
-
         let part: any;
         try { part = JSON.parse(msgStr); } catch { continue; }
-
         if (part.candidates?.[0]?.content?.parts) {
           for (const item of part.candidates[0].content.parts) {
             if (item.text) onDelta(item.text);
@@ -2834,17 +2704,17 @@ async function streamChatGemini({
               onToolCallDelta([{
                 index: toolCallIndex++,
                 id: tcId,
-                function: { name: desanitizeToolName(item.functionCall.name), arguments: JSON.stringify(item.functionCall.args || {}) }
+                // Server sanitized the name with "__"; reverse it back to "--"
+                function: { name: desanitizeToolName(item.functionCall.name), arguments: JSON.stringify(item.functionCall.args || {}) },
               }]);
             }
           }
         }
       }
     }
-
     onDone("completed");
   } catch (error: any) {
-    console.error("Chat error:", error);
+    console.error("Gemini stream error:", error);
     onError(error.message || "An error occurred");
   }
 }

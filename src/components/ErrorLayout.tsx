@@ -2,7 +2,6 @@ import React from "react";
 import { motion } from "motion/react";
 import { Home, ArrowLeft, RefreshCw } from "lucide-react";
 import { Button } from "./ui/button";
-import { useNavigate } from "react-router-dom";
 
 interface ErrorLayoutProps {
   code?: string | number;
@@ -21,8 +20,6 @@ const ErrorLayout: React.FC<ErrorLayoutProps> = ({
   showReload = false,
   errorDetails,
 }) => {
-  const navigate = useNavigate();
-
   return (
     <div className="min-h-screen bg-background flex items-center justify-center p-6 relative overflow-hidden">
       {/* Background Accents */}
@@ -45,7 +42,7 @@ const ErrorLayout: React.FC<ErrorLayoutProps> = ({
               </div>
             </div>
           )}
-          
+
           <div className="space-y-2">
             {code && (
               <span className="text-sm font-bold tracking-widest text-primary uppercase">
@@ -79,12 +76,12 @@ const ErrorLayout: React.FC<ErrorLayoutProps> = ({
             variant="outline"
             size="lg"
             className="rounded-xl gap-2 h-12 px-6"
-            onClick={() => navigate(-1)}
+            onClick={() => window.history.back()}
           >
             <ArrowLeft size={18} />
             Go Back
           </Button>
-          
+
           {showReload ? (
             <Button
               size="lg"
@@ -98,7 +95,7 @@ const ErrorLayout: React.FC<ErrorLayoutProps> = ({
             <Button
               size="lg"
               className="rounded-xl gap-2 h-12 px-6 bg-primary shadow-lg shadow-primary/20 hover:shadow-primary/30 transition-all"
-              onClick={() => navigate("/")}
+              onClick={() => { window.location.href = "/"; }}
             >
               <Home size={18} />
               Back to Home

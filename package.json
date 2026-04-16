@@ -12,7 +12,9 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
+    "@ai-sdk/anthropic": "^3.0.67",
     "@ai-sdk/google": "^3.0.55",
+    "@ai-sdk/react": "^3.0.155",
     "@daytonaio/sdk": "^0.150.0",
     "@google/genai": "^1.44.0",
     "@radix-ui/react-accordion": "^1.2.12",

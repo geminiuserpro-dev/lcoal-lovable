@@ -1,0 +1,9 @@
+[31mWebSocket server error: Port 24678 is already in use[39m
+TypeError: schema is not a function
+    at asSchema (C:\Users\USer\Downloads\more-enhanced-lovable-ui\more-enhanced\node_modules\ai\node_modules\@ai-sdk\provider-utils\src\schema.ts:143:11)
+    at prepareToolsAndToolChoice (C:\Users\USer\Downloads\more-enhanced-lovable-ui\more-enhanced\node_modules\ai\src\prompt\prepare-tools-and-tool-choice.ts:54:30)
+    at streamStep (C:\Users\USer\Downloads\more-enhanced-lovable-ui\more-enhanced\node_modules\ai\src\generate-text\stream-text.ts:1586:21)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+    at async fn (C:\Users\USer\Downloads\more-enhanced-lovable-ui\more-enhanced\node_modules\ai\src\generate-text\stream-text.ts:2166:9)
+    at async <anonymous> (C:\Users\USer\Downloads\more-enhanced-lovable-ui\more-enhanced\node_modules\ai\src\telemetry\record-span.ts:32:24)
+^C

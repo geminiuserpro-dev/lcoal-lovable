@@ -9,6 +9,7 @@ export default defineConfig(({mode}) => {
     plugins: [react(), tailwindcss()],
     define: {
       'process.env.GEMINI_API_KEY':     JSON.stringify(env.GEMINI_API_KEY     || process.env.GEMINI_API_KEY),
+      'process.env.ANTHROPIC_API_KEY':  JSON.stringify(env.ANTHROPIC_API_KEY  || process.env.ANTHROPIC_API_KEY),
       'process.env.AI_GATEWAY_API_KEY': JSON.stringify(env.AI_GATEWAY_API_KEY || process.env.AI_GATEWAY_API_KEY),
       'process.env.DAYTONA_API_KEY':    JSON.stringify(env.DAYTONA_API_KEY    || process.env.DAYTONA_API_KEY),
       'process.env.FIRECRAWL_API_KEY':  JSON.stringify(env.FIRECRAWL_API_KEY  || process.env.FIRECRAWL_API_KEY),
