@@ -4,24 +4,22 @@ import compression from "compression";
 import Stripe from "stripe";
 import { Daytona } from "@daytonaio/sdk";
 import { streamText, tool, gateway, stepCountIs, convertToModelMessages, jsonSchema } from "ai";
-import { google } from "@ai-sdk/google";
 import { z } from "zod";
-import { anthropic } from "@ai-sdk/anthropic";
 import { initializeApp, getApps } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
 
 // ── Types and Constants ────────────────────────────────────────
 
-const MODEL_CLAUDE_SONNET = "anthropic/claude-4.6-sonnet";
-const MODEL_CLAUDE_HAIKU = "anthropic/claude-3-5-haiku-20241022";
+const MODEL_CLAUDE_SONNET = "anthropic/claude-sonnet-4.6";
+const MODEL_CLAUDE_HAIKU = "anthropic/claude-3.5-haiku";
 const MODEL_GEMINI_DEFAULT = "google/gemini-2.0-flash";
 
 // ── Model display-name → real API model ID mappings ─────────────────────────────
 const GEMINI_MODEL_MAP: Record<string, string> = {
   "google/gemini-3-flash": "google/gemini-2.0-flash",
-  "google/gemini-3.-pro": "google/gemini-2.5-pro-preview-05-06",
+  "google/gemini-3.-pro": "google/gemini-2.5-pro",
   "google/gemini-2.0-flash-exp": "google/gemini-2.0-flash",
-  "google/gemini-2.5-pro": "google/gemini-2.5-pro-preview-05-06",
+  "google/gemini-2.5-pro": "google/gemini-2.5-pro",
   "gemini-2.0-flash-exp": "google/gemini-2.0-flash",
   "gemini-2.0-flash": "google/gemini-2.0-flash",
 };
@@ -29,13 +27,11 @@ const GEMINI_MODEL_MAP: Record<string, string> = {
 const CLAUDE_MODEL_MAP: Record<string, string> = {
   "claude-sonnet-4-6": MODEL_CLAUDE_SONNET,
   "anthropic/claude-sonnet-4.6": MODEL_CLAUDE_SONNET,
-  "claude-sonnet-4-5": MODEL_CLAUDE_SONNET,
-  "anthropic/claude-sonnet-4.5": MODEL_CLAUDE_SONNET,
-  "anthropic/claude-sonnet-4-5": MODEL_CLAUDE_SONNET,
+  "claude-sonnet-4-5": "anthropic/claude-sonnet-4.5",
+  "anthropic/claude-sonnet-4.5": "anthropic/claude-sonnet-4.5",
   "claude-3-7-sonnet-20250219": MODEL_CLAUDE_SONNET,
   "anthropic/claude-3.7-sonnet": MODEL_CLAUDE_SONNET,
-  "anthropic/claude-haiku-4.5": MODEL_CLAUDE_HAIKU,
-  "anthropic/claude-haiku-4-5": MODEL_CLAUDE_HAIKU,
+  "anthropic/claude-haiku-4.5": "anthropic/claude-haiku-4.5",
   "claude-3-5-haiku-20241022": MODEL_CLAUDE_HAIKU,
 };
 
@@ -2542,7 +2538,7 @@ app.post("/api/ai/gemini", async (req: any, res: any) => {
     const apiKey = process.env.AI_GATEWAY_API_KEY;
     if (!apiKey) return res.status(500).json({ error: "AI_GATEWAY_API_KEY not set" });
 
-    const modelId = GEMINI_MODEL_MAP[modelParam] || "google/gemini-3.1-pro";
+    const modelId = GEMINI_MODEL_MAP[modelParam] || "google/gemini-3.1-pro-preview";
     const oaiMessages = toOpenAIMessages(rawMessages || []);
 
     if (!oaiMessages.find(m => m.role === "system")) {
@@ -2715,22 +2711,10 @@ app.post("/api/ai/chat", async (req, res) => {
       ? (CLAUDE_MODEL_MAP[modelId] || modelId)
       : (GEMINI_MODEL_MAP[modelId] || modelId);
 
-    if (isClaude && !process.env.AI_GATEWAY_API_KEY && !process.env.ANTHROPIC_API_KEY) {
-      return res.status(500).json({ error: "Missing Claude credentials. Set AI_GATEWAY_API_KEY or ANTHROPIC_API_KEY." });
-    }
-
-    if (!isClaude && !process.env.AI_GATEWAY_API_KEY && !process.env.GEMINI_API_KEY) {
-      return res.status(500).json({ error: "Missing Gemini credentials. Set AI_GATEWAY_API_KEY or GEMINI_API_KEY." });
-    }
-
     const coreMessages = await convertToModelMessages(rawMessages || []);
     const sandbox = sandboxId ? await getDaytona().get(sandboxId) : null;
 
-    const selectedModel = process.env.AI_GATEWAY_API_KEY
-      ? gateway(realModelId)
-      : isClaude
-        ? anthropic(realModelId.replace(/^anthropic\//, ""))
-        : google(realModelId.replace(/^google\//, ""));
+    const selectedModel = gateway(realModelId);
 
     try {
       const result = streamText({
